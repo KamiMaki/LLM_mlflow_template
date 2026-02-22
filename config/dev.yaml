@@ -1,0 +1,16 @@
+llm:
+  url: "https://internal-llm-dev.company.com/v1/chat/completions"
+  auth_token: "${LLM_AUTH_TOKEN}"
+  default_model: "gpt-4o"
+  timeout: 30
+  max_retries: 3
+  temperature: 0.7
+
+mlflow:
+  tracking_uri: "http://mlflow-dev.company.com:5000"
+  experiment_name: "llm-framework-dev"
+  enabled: true
+
+logging:
+  level: "DEBUG"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

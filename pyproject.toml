@@ -1,0 +1,47 @@
+[project]
+name = "llm-framework"
+version = "0.1.0"
+description = "A universal LLM development framework with MLflow tracing, LangGraph workflows, and multi-environment support."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+]
+
+[dependency-groups]
+dev = [
+    "mlflow>=2.21",
+    "langgraph>=0.3",
+    "langchain-core>=0.3",
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+prod = [
+    "mlflow-tracing>=2.21",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_framework"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+.venv/
+.env
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Git
+.git/
+.gitignore
+
+# Project structure - don't include in image
+tests/
+docs/
+examples/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Misc
+.pytest_cache/
+.coverage
+htmlcov/

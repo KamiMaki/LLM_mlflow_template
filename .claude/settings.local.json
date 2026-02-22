@@ -1,0 +1,14 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:mlflow.org)",
+      "Bash(dir:*)",
+      "Bash(uv:*)",
+      "WebFetch(domain:docs.langchain.com)",
+      "Bash(ls -la \"C:\\\\Users\\\\Penguin\\\\Desktop\\\\LLM_template\\\\examples\"\" 2>nul || echo \"Directory empty or doesn 't exist \")"
+    ]
+  }
+}

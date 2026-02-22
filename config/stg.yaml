@@ -1,0 +1,16 @@
+llm:
+  url: "https://internal-llm-stg.company.com/v1/chat/completions"
+  auth_token: "${LLM_AUTH_TOKEN}"
+  default_model: "gpt-4o"
+  timeout: 60
+  max_retries: 3
+  temperature: 0.0
+
+mlflow:
+  tracking_uri: "http://mlflow-stg.company.com:5000"
+  experiment_name: "llm-framework-stg"
+  enabled: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
