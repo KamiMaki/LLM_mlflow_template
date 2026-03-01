@@ -4,16 +4,12 @@ Usage:
     # 直接執行
     python -m app.main
 
-    # 使用 Hydra override
-    python -m app.main env=prod
-
     # 使用 uvicorn (支援 hot reload)
     uvicorn app.main:app --reload
 """
 
 from __future__ import annotations
 
-import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -50,7 +46,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -59,7 +54,6 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 註冊基礎 router
     from app.api.router import base_router
     application.include_router(base_router)
 
@@ -74,8 +68,7 @@ def start():
     """啟動 uvicorn 服務。"""
     from app.utils.config import init_config
 
-    overrides = [arg for arg in sys.argv[1:] if "=" in arg]
-    cfg = init_config(overrides=overrides)
+    cfg = init_config()
 
     host = cfg.api.host if hasattr(cfg, "api") else "0.0.0.0"
     port = cfg.api.port if hasattr(cfg, "api") else 8000

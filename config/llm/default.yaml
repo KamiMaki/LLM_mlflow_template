@@ -1,8 +1,0 @@
-# llm_service SDK 設定
-# 此區段會被提取為 dict 傳給 LLMClient
-url: "https://api.example.com/v1/chat/completions"
-auth_token: "${oc.env:LLM_AUTH_TOKEN,''}"
-default_model: "gpt-4o"
-timeout: 30
-max_retries: 3
-temperature: 0.7

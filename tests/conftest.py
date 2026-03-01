@@ -3,31 +3,22 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
-from omegaconf import DictConfig
 
 from app.utils.config import init_config, reset_config
 
 
 @pytest.fixture(autouse=True)
-def _reset_hydra():
-    """每個測試後重置 Hydra 狀態。"""
+def _reset_config():
+    """每個測試後重置 config 狀態。"""
     yield
     reset_config()
 
 
 @pytest.fixture()
-def test_config() -> DictConfig:
-    """載入 test 環境設定。"""
-    return init_config(overrides=["env=test"])
-
-
-@pytest.fixture()
-def default_config() -> DictConfig:
+def default_config():
     """載入預設設定。"""
     return init_config()
 

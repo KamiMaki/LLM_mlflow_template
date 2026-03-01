@@ -33,10 +33,8 @@ def setup_logging(cfg=None) -> None:
 
     # 取得 log level
     level = "INFO"
-    env = "prod"
     if cfg is not None:
         level = getattr(cfg.logging, "level", "INFO") if hasattr(cfg, "logging") else "INFO"
-        env = getattr(cfg, "env", "prod") if hasattr(cfg, "env") else "prod"
 
     # 移除預設 handler
     _loguru_logger.remove()
@@ -53,16 +51,6 @@ def setup_logging(cfg=None) -> None:
         ),
         colorize=True,
     )
-
-    # DEV/TEST: 額外寫入檔案
-    if env in ("dev", "test"):
-        _loguru_logger.add(
-            "logs/{time:YYYY-MM-DD}.log",
-            level="DEBUG",
-            rotation="10 MB",
-            retention="7 days",
-            encoding="utf-8",
-        )
 
     _initialized = True
 

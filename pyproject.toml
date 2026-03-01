@@ -14,8 +14,6 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "loguru>=0.7",
-    "hydra-core>=1.3",
-    "omegaconf>=2.3",
     "tenacity>=9.0",
     # llm-service SDK (本地 path dependency，請依實際路徑調整)
     # "llm-service @ file:///path/to/llm_service",

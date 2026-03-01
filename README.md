@@ -35,17 +35,14 @@ LLM_template/
 │   │   ├── mlflow_logger.py    # MLflow logging
 │   │   └── prompts.py          # PromptManager
 │   └── utils/                  # 設定管理
-│       └── config.py           # Hydra config 載入
+│       └── config.py           # YAML config 載入
 │
 ├── llm_service/                # Mock LLM SDK（正式部署替換為真正 SDK）
-│   ├── client.py               # LLMClient
+│   ├── client.py               # LLMClient（自帶 config）
 │   └── models.py               # LLMResponse, TokenUsage
 │
-├── config/                     # Hydra 設定
-│   ├── config.yaml             # 主設定
-│   ├── llm/                    # LLM SDK 設定
-│   ├── env/                    # 環境 overrides (dev/test/stg/prod)
-│   └── ...                     # api, mlflow, logging, dataloader
+├── config/
+│   └── config.yaml             # Template 設定（API、logging、MLflow、dataloader）
 │
 ├── tests/                      # 單元測試
 ├── examples/                   # Jupyter notebook 範例
@@ -72,11 +69,8 @@ export API_AUTH_TOKEN="your-api-auth-token"
 ### 3. 啟動服務
 
 ```bash
-# 開發環境 (預設)
+# 啟動
 python -m app.main
-
-# 指定環境
-python -m app.main env=prod
 
 # 使用 uvicorn (支援 hot reload)
 uvicorn app.main:app --reload
@@ -130,35 +124,43 @@ async def chat(request: LLMRequest, token: str = Depends(require_auth)):
 curl -H "Authorization: Bearer your-api-auth-token" http://localhost:8000/chat
 ```
 
-## Config 管理 (Hydra)
+## Config 管理
 
-使用 [Hydra](https://hydra.cc/) 進行設定管理，支援群組式設定組合與環境 override。
+使用單一 YAML 設定檔，支援 `${ENV_VAR}` 和 `${ENV_VAR:default}` 環境變數語法。
 
 ```yaml
 # config/config.yaml
-defaults:
-  - llm: default
-  - api: default
-  - mlflow: default
-  - logging: default
-  - dataloader: default
-  - env: dev          # 切換環境: dev/test/stg/prod
-  - _self_
+project_name: "my-llm-service"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  auth_token: "${API_AUTH_TOKEN:}"
+
+logging:
+  level: "INFO"
+
+mlflow:
+  enabled: true
+  experiment_name: "default"
+
+dataloader:
+  base_path: "./data"
 ```
 
-### 命令列 Override
-
-```bash
-python -m app.main llm.default_model=QWEN3 api.port=9000
-```
+> **Note:** `llm_service` SDK 有自己獨立的 config，不包含在此設定檔中。
 
 ### 程式中取得設定
 
 ```python
-from app.utils.config import init_config, get_config, get_llm_config
+from app.utils.config import init_config, get_config
 
-cfg = init_config(overrides=["env=prod"])
-llm_dict = get_llm_config()  # 給 llm_service SDK
+cfg = init_config()                    # 載入預設 config/config.yaml
+cfg = init_config("path/to/my.yaml")   # 載入指定檔案
+
+# dot-notation 和 dict 存取皆可
+cfg.api.port       # 8000
+cfg["api"]["port"]  # 8000
 ```
 
 ## Evaluation
@@ -212,13 +214,13 @@ from app.tracking import PromptManager
 
 pm = PromptManager(cfg)
 
-# 註冊 prompt (DEV: 存到 MLflow)
+# 註冊 prompt (存到 MLflow 或 local)
 pm.register("summarize", "請摘要以下內容：\n\n{{text}}")
 
 # 載入並渲染
 rendered = pm.render("summarize", text="一段很長的文字...")
 
-# 部署前匯出為 markdown
+# 匯出為 markdown
 pm.export_all("./prompts")
 ```
 
@@ -234,13 +236,12 @@ pm.export_all("./prompts")
 ## 技術棧
 
 - **FastAPI** — API 框架
-- **Hydra** — 設定管理
 - **LangGraph** — Workflow 引擎
 - **MLflow** — Tracing、Prompt 管理、Evaluation 記錄
 - **Loguru** — 日誌
 - **Pydantic** — 資料驗證
 - **Tenacity** — 重試控制
-- **llm_service** — LLM 呼叫 SDK (外部依賴)
+- **llm_service** — LLM 呼叫 SDK (外部依賴，自帶 config)
 
 ## 授權
 

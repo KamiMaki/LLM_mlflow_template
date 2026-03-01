@@ -11,8 +11,10 @@ from app.utils.config import init_config
 
 
 class TestInitMlflow:
-    def test_init_disabled(self):
-        cfg = init_config(overrides=["mlflow.enabled=false"])
+    def test_init_disabled(self, tmp_path: Path):
+        cfg_file = tmp_path / "cfg.yaml"
+        cfg_file.write_text("mlflow:\n  enabled: false\n", encoding="utf-8")
+        cfg = init_config(str(cfg_file))
         init_mlflow(cfg)
 
     def test_is_mlflow_available_returns_bool(self):

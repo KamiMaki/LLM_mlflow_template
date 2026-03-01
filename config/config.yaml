@@ -1,10 +1,29 @@
-defaults:
-  - llm: default
-  - api: default
-  - mlflow: default
-  - logging: default
-  - dataloader: default
-  - env: dev
-  - _self_
+# LLM Project Template — 主設定檔
+# 環境變數語法: ${ENV_VAR} 或 ${ENV_VAR:default_value}
 
 project_name: "my-llm-service"
+
+# --- API ---
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  auth_token: "${API_AUTH_TOKEN:}"
+  cors_origins:
+    - "*"
+
+# --- Logging ---
+logging:
+  level: "INFO"
+
+# --- MLflow ---
+mlflow:
+  enabled: true
+  tracking_uri: ""
+  experiment_name: "default"
+  prompt_export_dir: "./prompts"
+
+# --- Dataloader ---
+dataloader:
+  base_path: "./data"
+  encoding: "utf-8"
