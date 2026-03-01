@@ -130,3 +130,11 @@ Thumbs.db
 # MLflow
 mlruns/
 .mlflow/
+mlflow.db
+
+# Hydra
+outputs/
+multirun/
+
+# Logs
+logs/

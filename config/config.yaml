@@ -1,0 +1,10 @@
+defaults:
+  - llm: default
+  - api: default
+  - mlflow: default
+  - logging: default
+  - dataloader: default
+  - env: dev
+  - _self_
+
+project_name: "my-llm-service"

@@ -1,0 +1,4 @@
+tracking_uri: ""
+experiment_name: "default"
+enabled: true
+prompt_export_dir: "./prompts"

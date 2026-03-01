@@ -1,7 +1,7 @@
 [project]
-name = "llm-framework"
+name = "llm-project-template"
 version = "0.1.0"
-description = "A universal LLM development framework with MLflow tracing, LangGraph workflows, and multi-environment support."
+description = "通用 LLM 後端服務模板 — 預建 logging、evaluation、dataloader 等模組，工程師只需處理資料輸入與建立 workflow 即可開始工作。"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -11,6 +11,14 @@ dependencies = [
     "pyyaml>=6.0",
     "httpx>=0.27",
     "jinja2>=3.1",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "loguru>=0.7",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "tenacity>=9.0",
+    # llm-service SDK (本地 path dependency，請依實際路徑調整)
+    # "llm-service @ file:///path/to/llm_service",
 ]
 
 [dependency-groups]
@@ -23,21 +31,12 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
 ]
-prod = [
-    "mlflow-tracing>=2.21",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/llm_framework"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]
 addopts = "-v --tb=short"
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 120
