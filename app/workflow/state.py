@@ -1,9 +1,9 @@
-"""LangGraph TypedDict state schemas 與 factory functions。
+"""LangGraph TypedDict state schemas。
 
 Usage:
-    from app.workflow.state import WorkflowState, create_workflow_state
+    from app.workflow.state import LLMState, create_llm_state
 
-    initial = create_workflow_state(messages=[{"role": "user", "content": "Hello"}])
+    initial = create_llm_state(messages=[{"role": "user", "content": "Hello"}])
 """
 
 from __future__ import annotations
@@ -27,17 +27,10 @@ class BaseState(TypedDict):
 
 
 class LLMState(BaseState):
-    """單一 LLM 呼叫的狀態。"""
+    """LLM 呼叫 workflow 狀態。"""
     llm_response: str
     token_usage: dict[str, int]
-    error: str | None
-
-
-class WorkflowState(BaseState):
-    """多步驟 workflow 狀態。"""
-    current_step: str
-    results: dict[str, Any]
-    retry_count: int
+    model: str
     error: str | None
 
 
@@ -53,6 +46,7 @@ def create_llm_state(
     metadata: dict[str, Any] | None = None,
     llm_response: str = "",
     token_usage: dict[str, int] | None = None,
+    model: str = "",
     error: str | None = None,
 ) -> LLMState:
     return LLMState(
@@ -60,23 +54,6 @@ def create_llm_state(
         metadata=metadata or {},
         llm_response=llm_response,
         token_usage=token_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        error=error,
-    )
-
-
-def create_workflow_state(
-    messages: list[dict[str, str]] | None = None,
-    metadata: dict[str, Any] | None = None,
-    current_step: str = "",
-    results: dict[str, Any] | None = None,
-    retry_count: int = 0,
-    error: str | None = None,
-) -> WorkflowState:
-    return WorkflowState(
-        messages=messages or [],
-        metadata=metadata or {},
-        current_step=current_step,
-        results=results or {},
-        retry_count=retry_count,
+        model=model,
         error=error,
     )

@@ -1,24 +1,20 @@
-"""MLflow Prompt 管理 — 註冊、載入、匯出 prompt 模板。
+"""MLflow Prompt 管理 — 使用 MLflow 3.x genai API 註冊、載入、格式化 prompt。
 
-DEV 環境: prompt 透過 MLflow 註冊管理（存在 mlruns/）。
+DEV 環境: prompt 透過 MLflow Prompt Registry 管理。
 部署環境: prompt 匯出為 local markdown，不依賴 MLflow。
 
 Usage:
     from app.tracking.prompts import PromptManager
 
     pm = PromptManager(cfg)
-    pm.register("summarize", "Summarize: {{text}}")
-    template = pm.load("summarize")
-    rendered = pm.render("summarize", text="Hello world")
-    pm.export_all("./prompts")
+    pm.register("summarize", "Summarize: {{ text }}")
+    formatted = pm.load_and_format("summarize", text="Hello world")
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-
-from jinja2 import Template
 
 from app.logger import get_logger
 from app.tracking.setup import is_mlflow_available
@@ -27,7 +23,7 @@ logger = get_logger(__name__)
 
 
 class PromptManager:
-    """管理 prompt 模板：MLflow 優先，local markdown fallback。"""
+    """管理 prompt 模板：MLflow Prompt Registry 優先，local markdown fallback。"""
 
     def __init__(self, cfg=None) -> None:
         self._export_dir = Path("./prompts")
@@ -35,13 +31,20 @@ class PromptManager:
             export_dir = getattr(cfg.mlflow, "prompt_export_dir", "./prompts")
             self._export_dir = Path(export_dir)
 
-    def register(self, name: str, template: str, commit_message: str = "") -> str | None:
-        """註冊或更新 prompt 到 MLflow。
+    def register(
+        self,
+        name: str,
+        template: str,
+        commit_message: str = "",
+        model_config: dict[str, Any] | None = None,
+    ) -> str | None:
+        """註冊或更新 prompt 到 MLflow Prompt Registry。
 
         Args:
             name: Prompt 名稱。
-            template: Jinja2 模板字串。
+            template: 模板字串（使用 {{ variable }} 語法）。
             commit_message: 版本紀錄訊息。
+            model_config: 綁定的模型設定（model, temperature 等）。
 
         Returns:
             版本號字串，MLflow 不可用時回傳 None。
@@ -55,32 +58,39 @@ class PromptManager:
             import mlflow
 
             try:
-                existing = mlflow.load_prompt(f"prompts:/{name}")
+                existing = mlflow.genai.load_prompt(f"prompts:/{name}")
                 if existing.template == template:
                     logger.debug(f"Prompt '{name}' unchanged, skipping update")
-                    return existing.version
-                prompt = mlflow.update_prompt(name=name, template=template, commit_message=commit_message)
+                    return str(getattr(existing, "version", "latest"))
+
+                kwargs = {"name": name, "template": template, "commit_message": commit_message}
+                if model_config:
+                    kwargs["model_config"] = model_config
+                prompt = mlflow.genai.register_prompt(**kwargs)
                 logger.info(f"Updated prompt '{name}' to version {prompt.version}")
-                return prompt.version
+                return str(prompt.version)
             except Exception:
-                prompt = mlflow.register_prompt(name=name, template=template, commit_message=commit_message)
+                kwargs = {"name": name, "template": template, "commit_message": commit_message}
+                if model_config:
+                    kwargs["model_config"] = model_config
+                prompt = mlflow.genai.register_prompt(**kwargs)
                 logger.info(f"Registered new prompt '{name}' version {prompt.version}")
-                return prompt.version
+                return str(prompt.version)
 
         except Exception as e:
             logger.error(f"Failed to register prompt '{name}': {e}")
             self._save_local(name, template)
             return None
 
-    def load(self, name: str, version: str | None = None) -> str:
-        """載入 prompt 模板。MLflow 優先，local .md fallback。
+    def load(self, name: str, version: str | None = None) -> Any:
+        """載入 prompt 物件。MLflow 優先，local fallback 回傳字串。
 
         Args:
             name: Prompt 名稱。
             version: 指定版本，None 為最新版。
 
         Returns:
-            模板字串。
+            MLflow PromptVersion 物件（有 .format() 方法）或 template 字串。
 
         Raises:
             FileNotFoundError: 兩邊都找不到時。
@@ -88,10 +98,13 @@ class PromptManager:
         if is_mlflow_available():
             try:
                 import mlflow
-                uri = f"prompts:/{name}" + (f"/{version}" if version else "")
-                prompt = mlflow.load_prompt(uri)
+                if version:
+                    uri = f"prompts:/{name}/{version}"
+                else:
+                    uri = f"prompts:/{name}@latest"
+                prompt = mlflow.genai.load_prompt(uri)
                 logger.debug(f"Loaded prompt '{name}' from MLflow")
-                return prompt.template
+                return prompt
             except Exception as e:
                 logger.debug(f"MLflow load failed for '{name}': {e}, trying local")
 
@@ -102,8 +115,8 @@ class PromptManager:
 
         raise FileNotFoundError(f"Prompt '{name}' not found in MLflow or at {local_path}")
 
-    def render(self, name: str, version: str | None = None, **variables: Any) -> str:
-        """載入 prompt 並用 Jinja2 渲染。
+    def load_and_format(self, name: str, version: str | None = None, **variables: Any) -> str:
+        """載入 prompt 並格式化。
 
         Args:
             name: Prompt 名稱。
@@ -111,10 +124,16 @@ class PromptManager:
             **variables: 模板變數。
 
         Returns:
-            渲染後的字串。
+            格式化後的字串。
         """
-        template_str = self.load(name, version)
-        return Template(template_str).render(**variables)
+        prompt = self.load(name, version)
+        if not isinstance(prompt, str) and hasattr(prompt, "format"):
+            return prompt.format(**variables)
+        # local fallback: 簡易 {{ var }} 替換
+        result = str(prompt)
+        for key, value in variables.items():
+            result = result.replace("{{ " + key + " }}", str(value))
+        return result
 
     def export_all(self, output_dir: str | Path | None = None) -> list[str]:
         """匯出所有 MLflow 中的 prompt 為 local markdown。
@@ -136,10 +155,9 @@ class PromptManager:
             export_path.mkdir(parents=True, exist_ok=True)
 
             exported = []
-            client = mlflow.tracking.MlflowClient()
-            for prompt_info in client.search_registered_prompts():
+            for prompt_info in mlflow.genai.search_prompts():
                 name = prompt_info.name
-                prompt = mlflow.load_prompt(f"prompts:/{name}")
+                prompt = mlflow.genai.load_prompt(f"prompts:/{name}@latest")
                 file_path = export_path / f"{name}.md"
                 file_path.write_text(prompt.template, encoding="utf-8")
                 exported.append(str(file_path))

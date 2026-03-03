@@ -2,72 +2,109 @@
 
 from __future__ import annotations
 
-import pytest
-
-from app.workflow import BaseWorkflow, WorkflowError, WorkflowState, create_workflow_state
-
-
-def passthrough_node(state: dict) -> dict:
-    """簡單的 pass-through node，用於測試。"""
-    return {"results": {**state.get("results", {}), "done": True}}
-
-
-class TestBaseWorkflow:
-    def test_build_and_run(self):
-        wf = (
-            BaseWorkflow("test-wf", WorkflowState)
-            .add_node("step1", passthrough_node)
-            .set_entry("step1")
-            .set_finish("step1")
-            .compile()
-        )
-        initial = create_workflow_state(
-            messages=[{"role": "user", "content": "hi"}],
-        )
-        result = wf.run(initial)
-        assert result["results"]["done"] is True
-
-    def test_run_without_compile_raises(self):
-        wf = (
-            BaseWorkflow("test-wf", WorkflowState)
-            .add_node("step1", passthrough_node)
-            .set_entry("step1")
-            .set_finish("step1")
-        )
-        with pytest.raises(WorkflowError):
-            wf.run(create_workflow_state())
-
-    def test_compile_without_entry_raises(self):
-        wf = BaseWorkflow("test-wf", WorkflowState).add_node("step1", passthrough_node)
-        with pytest.raises(WorkflowError):
-            wf.compile()
-
-    def test_multi_node_workflow(self):
-        def node_a(state: dict) -> dict:
-            return {"results": {**state.get("results", {}), "a": True}}
-
-        def node_b(state: dict) -> dict:
-            return {"results": {**state.get("results", {}), "b": True}}
-
-        wf = (
-            BaseWorkflow("multi", WorkflowState)
-            .add_node("a", node_a)
-            .add_node("b", node_b)
-            .add_edge("a", "b")
-            .set_entry("a")
-            .set_finish("b")
-            .compile()
-        )
-        result = wf.run(create_workflow_state())
-        assert result["results"]["a"] is True
-        assert result["results"]["b"] is True
+from app.workflow import LLMState, create_llm_state, create_base_state, create_call_llm_node
+from app.workflow.state import BaseState
 
 
 class TestStateFactories:
-    def test_create_workflow_state_defaults(self):
-        state = create_workflow_state()
+    def test_create_base_state_defaults(self):
+        state = create_base_state()
         assert state["messages"] == []
         assert state["metadata"] == {}
-        assert state["current_step"] == ""
-        assert state["retry_count"] == 0
+
+    def test_create_llm_state_defaults(self):
+        state = create_llm_state()
+        assert state["messages"] == []
+        assert state["metadata"] == {}
+        assert state["llm_response"] == ""
+        assert state["token_usage"]["total_tokens"] == 0
+        assert state["model"] == ""
         assert state["error"] is None
+
+    def test_create_llm_state_with_values(self):
+        state = create_llm_state(
+            messages=[{"role": "user", "content": "hi"}],
+            metadata={"key": "value"},
+            llm_response="hello",
+            model="gpt-4o",
+        )
+        assert len(state["messages"]) == 1
+        assert state["llm_response"] == "hello"
+        assert state["model"] == "gpt-4o"
+
+
+class TestCallLLMNode:
+    def test_create_call_llm_node_returns_callable(self):
+        """create_call_llm_node 應回傳 callable。"""
+        class MockClient:
+            def chat(self, system_prompt, user_prompt, **kwargs):
+                pass
+        node = create_call_llm_node(MockClient())
+        assert callable(node)
+
+    def test_call_llm_node_handles_error(self):
+        """LLM 呼叫失敗時應回傳 error。"""
+        class FailingClient:
+            def chat(self, system_prompt, user_prompt, **kwargs):
+                raise ConnectionError("Service unavailable")
+
+        node = create_call_llm_node(FailingClient())
+        state = create_llm_state(
+            messages=[{"role": "user", "content": "test"}],
+        )
+        result = node(state)
+        assert result["error"] is not None
+        assert "Service unavailable" in result["error"]
+        assert result["llm_response"] == ""
+
+    def test_call_llm_node_success(self):
+        """LLM 呼叫成功時應回傳回應內容。"""
+        class MockResponse:
+            content = "Hello back!"
+            model = "test-model"
+            class usage:
+                prompt_tokens = 10
+                completion_tokens = 5
+                total_tokens = 15
+
+        class MockClient:
+            def chat(self, system_prompt, user_prompt, **kwargs):
+                return MockResponse()
+
+        node = create_call_llm_node(MockClient())
+        state = create_llm_state(
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+        result = node(state)
+        assert result["error"] is None
+        assert result["llm_response"] == "Hello back!"
+        assert result["model"] == "test-model"
+        assert result["token_usage"]["total_tokens"] == 15
+
+    def test_call_llm_node_extracts_last_user_message(self):
+        """應取得最後一則 user message。"""
+        class MockResponse:
+            content = "response"
+            model = "m"
+            class usage:
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
+
+        captured = {}
+
+        class MockClient:
+            def chat(self, system_prompt, user_prompt, **kwargs):
+                captured["user_prompt"] = user_prompt
+                return MockResponse()
+
+        node = create_call_llm_node(MockClient())
+        state = create_llm_state(
+            messages=[
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "second"},
+            ],
+        )
+        node(state)
+        assert captured["user_prompt"] == "second"

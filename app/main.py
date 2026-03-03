@@ -42,7 +42,7 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="LLM Service",
         description="LLM 後端服務模板",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 

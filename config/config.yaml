@@ -12,6 +12,14 @@ api:
   cors_origins:
     - "*"
 
+# --- LLM Model ---
+model:
+  name: "gpt-4o-mini"
+  temperature: 0.7
+  max_tokens: 2000
+  base_url: "http://localhost:11434/v1"
+  auth_token: "${LLM_AUTH_TOKEN:}"
+
 # --- Logging ---
 logging:
   level: "INFO"
@@ -21,6 +29,7 @@ mlflow:
   enabled: true
   tracking_uri: ""
   experiment_name: "default"
+  model_name: ""
   prompt_export_dir: "./prompts"
 
 # --- Dataloader ---

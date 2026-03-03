@@ -1,2 +1,1 @@
-from app.evaluator.runner import EvaluationRunner
-from app.evaluator.models import TestCase, ScorerResult, EvalResult
+from app.evaluator.runner import run_evaluation, run_trace_evaluation

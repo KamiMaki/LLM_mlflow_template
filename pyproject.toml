@@ -1,7 +1,7 @@
 [project]
 name = "llm-project-template"
-version = "0.1.0"
-description = "通用 LLM 後端服務模板 — 預建 logging、evaluation、dataloader 等模組，工程師只需處理資料輸入與建立 workflow 即可開始工作。"
+version = "0.2.0"
+description = "通用 LLM 後端服務模板 — 整合 MLflow 3.x GenAI + LangGraph，提供 tracing、evaluation、prompt optimization 等功能。"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -10,7 +10,6 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "httpx>=0.27",
-    "jinja2>=3.1",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "loguru>=0.7",
@@ -21,9 +20,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "mlflow>=2.21",
+    "mlflow>=3.5",
     "langgraph>=0.3",
     "langchain-core>=0.3",
+    "langchain-openai>=0.3",
     "pytest>=8.0",
     "pytest-cov>=6.0",
     "pytest-asyncio>=0.24",
