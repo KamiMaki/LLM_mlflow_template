@@ -25,8 +25,7 @@ logger = get_logger(__name__)
 async def lifespan(application: FastAPI):
     """應用程式生命週期：啟動時初始化 config、logger、MLflow。"""
     from app.utils.config import init_config
-    from app.logger import setup_logging
-    from app.tracking.setup import init_mlflow
+    from app.logger import setup_logging, init_mlflow
 
     cfg = init_config()
     setup_logging(cfg)

@@ -15,25 +15,22 @@ LLM_template/
 │   │   ├── auth.py             # Bearer token 認證
 │   │   ├── router.py           # /health, /ready
 │   │   └── models.py           # Base request/response
-│   ├── workflow/               # LangGraph workflow
-│   │   ├── base.py             # BaseWorkflow (builder pattern)
-│   │   ├── state.py            # TypedDict state schemas
-│   │   └── tools/              # parser, validator, structured_output
+│   ├── workflow/               # LangGraph workflow（直接使用原生 API）
+│   │   ├── state.py            # TypedDict state schemas (BaseState, LLMState)
+│   │   ├── nodes.py            # 通用 node functions (create_call_llm_node)
+│   │   └── build_workflow.py   # 預建 workflow 範例
 │   ├── dataloader/             # 資料載入模組
 │   │   ├── base.py             # BaseLoader (ABC)
 │   │   ├── local.py            # LocalFileLoader
 │   │   └── models.py           # LoadedData, LoaderConfig
-│   ├── evaluator/              # Evaluation 模組
-│   │   ├── runner.py           # EvaluationRunner
-│   │   ├── models.py           # TestCase, EvalResult
-│   │   └── scorers/            # 內建 + 自定義 scorers
-│   ├── logger/                 # Loguru 日誌
-│   │   └── setup.py            # setup_logging(), get_logger()
-│   ├── tracking/               # MLflow 整合
-│   │   ├── setup.py            # init_mlflow()
-│   │   ├── tracer.py           # trace decorators
-│   │   ├── mlflow_logger.py    # MLflow logging
-│   │   └── prompts.py          # PromptManager
+│   ├── evaluator/              # MLflow GenAI Evaluation
+│   │   ├── runner.py           # run_evaluation(), run_trace_evaluation()
+│   │   └── scorers.py          # @scorer + LLM Judge (LLMClient)
+│   ├── logger/                 # Loguru 日誌 + MLflow 初始化
+│   │   └── setup.py            # setup_logging(), get_logger(), init_mlflow()
+│   ├── prompts/                # Prompt 管理
+│   │   ├── manager.py          # PromptManager (MLflow Registry + local fallback)
+│   │   └── optimize.py         # optimize_prompt() (GEPA)
 │   └── utils/                  # 設定管理
 │       └── config.py           # YAML config 載入
 │
@@ -85,25 +82,23 @@ uv run pytest -v
 ### 5. 建立你的第一個 Workflow
 
 ```python
-from app.workflow import BaseWorkflow, WorkflowState, create_workflow_state
 from llm_service import LLMClient
+from app.workflow import LLMState, create_llm_state, create_call_llm_node
+from langgraph.graph import END, StateGraph
 
 client = LLMClient()
 
-def my_node(state: dict) -> dict:
-    response = client.chat("你是助手", state["metadata"]["user_input"])
-    return {"results": {"output": response.content}}
+# 使用預建的 call_llm node（帶 MLflow span 追蹤）
+call_llm = create_call_llm_node(client, default_system_prompt="你是助手")
 
-workflow = (
-    BaseWorkflow("my_workflow", WorkflowState)
-    .add_node("process", my_node)
-    .set_entry("process")
-    .set_finish("process")
-    .compile()
-)
+graph = StateGraph(LLMState)
+graph.add_node("call_llm", call_llm)
+graph.set_entry_point("call_llm")
+graph.add_edge("call_llm", END)
+compiled = graph.compile()
 
-result = workflow.run(create_workflow_state(
-    metadata={"user_input": "Hello"},
+result = compiled.invoke(create_llm_state(
+    messages=[{"role": "user", "content": "Hello"}],
 ))
 ```
 
@@ -165,60 +160,51 @@ cfg["api"]["port"]  # 8000
 
 ## Evaluation
 
-### 準備 Test Cases (`data/eval/my_cases.json`)
+使用 MLflow GenAI evaluate 進行模型評估：
 
-```json
-[
-  {
-    "input": {
-      "system_prompt": "你是一個摘要助手",
-      "user_prompt": "請摘要以下文件..."
+```python
+from app.evaluator import run_evaluation
+from app.evaluator.scorers import response_not_empty, contains_keywords
+
+# 準備評估資料
+eval_data = [
+    {
+        "inputs": {"question": "台灣的首都是哪裡？"},
+        "expectations": {"expected": "台北", "keywords": "台北,首都"},
     },
-    "expected": "關鍵字1,關鍵字2",
-    "metadata": {"category": "summarization"}
-  }
 ]
-```
 
-### 執行驗證
-
-```python
-from app.evaluator import EvaluationRunner
-from app.evaluator.scorers import ContainsScorer, ExactMatchScorer
-
-runner = EvaluationRunner()
-results = runner.evaluate(
-    workflow_fn=my_workflow_function,
-    test_cases="data/eval/my_cases.json",
-    scorers=[ContainsScorer(), ExactMatchScorer()],
+# 執行評估
+results = run_evaluation(
+    predict_fn=my_app,
+    eval_data=eval_data,
+    scorers=[response_not_empty, contains_keywords],
 )
-print(f"平均分數: {results.metrics['avg_score']}")
-print(f"通過率: {results.metrics['pass_rate']}")
-# 結果自動記錄到 MLflow
 ```
 
-### 自定義 Scorer
+### LLM Judge（使用 LLMClient）
 
 ```python
-from app.evaluator.scorers import BaseScorer
+from llm_service import LLMClient
+from app.evaluator.scorers import create_quality_judge, create_tone_judge
 
-class MySimilarityScorer(BaseScorer):
-    def score(self, output: str, expected: str) -> dict[str, float | str]:
-        return {"score": 0.9, "reason": "High similarity"}
+client = LLMClient()
+quality_judge = create_quality_judge(client)
+tone_judge = create_tone_judge(client)
 ```
 
 ## Prompt 管理
 
 ```python
-from app.tracking import PromptManager
+from app.prompts import PromptManager
 
 pm = PromptManager(cfg)
 
 # 註冊 prompt (存到 MLflow 或 local)
-pm.register("summarize", "請摘要以下內容：\n\n{{text}}")
+pm.register("summarize", "請摘要以下內容：\n\n{{ text }}")
 
-# 載入並渲染
-rendered = pm.render("summarize", text="一段很長的文字...")
+# 載入並格式化
+rendered = pm.load_and_format("summarize", text="一段很長的文字...")
 
 # 匯出為 markdown
 pm.export_all("./prompts")
@@ -228,16 +214,16 @@ pm.export_all("./prompts")
 
 | Notebook | 主題 |
 |----------|------|
-| [01_hello_world](examples/01_hello_world.ipynb) | 基本設定與 LLM 呼叫 |
-| [02_custom_workflow](examples/02_custom_workflow.ipynb) | 建立多步驟 Workflow |
-| [03_evaluation](examples/03_evaluation.ipynb) | 模型評估與計分 |
-| [04_mlflow_tracking](examples/04_mlflow_tracking.ipynb) | MLflow 追蹤與 Prompt 管理 |
+| [01_hello_world](examples/01_hello_world.ipynb) | 基本設定與 LLM 呼叫 + MLflow Autolog |
+| [02_custom_workflow](examples/02_custom_workflow.ipynb) | LangGraph 多步驟 Workflow |
+| [03_evaluation](examples/03_evaluation.ipynb) | MLflow GenAI 評估框架 |
+| [04_prompt_management](examples/04_prompt_management.ipynb) | Prompt 註冊、版本管理與自動優化 |
 
 ## 技術棧
 
 - **FastAPI** — API 框架
-- **LangGraph** — Workflow 引擎
-- **MLflow** — Tracing、Prompt 管理、Evaluation 記錄
+- **LangGraph** — Workflow 引擎（直接使用原生 API）
+- **MLflow 3.x** — Autolog Tracing、Prompt Registry、GenAI Evaluation
 - **Loguru** — 日誌
 - **Pydantic** — 資料驗證
 - **Tenacity** — 重試控制

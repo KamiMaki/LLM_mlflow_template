@@ -4,7 +4,7 @@ DEV 環境: prompt 透過 MLflow Prompt Registry 管理。
 部署環境: prompt 匯出為 local markdown，不依賴 MLflow。
 
 Usage:
-    from app.tracking.prompts import PromptManager
+    from app.prompts import PromptManager
 
     pm = PromptManager(cfg)
     pm.register("summarize", "Summarize: {{ text }}")
@@ -16,8 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.logger import get_logger
-from app.tracking.setup import is_mlflow_available
+from app.logger import get_logger, is_mlflow_available
 
 logger = get_logger(__name__)
 

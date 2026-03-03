@@ -1,18 +1,21 @@
 """MLflow GenAI Scorers — 自定義評分器與 LLM Judge。
 
-使用 MLflow 3.x @scorer decorator 和 make_judge() 建立評分器。
+Rule-based scorers 使用 MLflow @scorer decorator。
+LLM Judge 使用 LLMClient 進行評分，不依賴 make_judge。
 
 Usage:
-    from app.evaluator.scorers import response_not_empty, response_length_check, tone_judge
+    from app.evaluator.scorers import response_not_empty, create_quality_judge
 
     results = mlflow.genai.evaluate(
         data=eval_data,
         predict_fn=my_app,
-        scorers=[response_not_empty, response_length_check, tone_judge],
+        scorers=[response_not_empty, create_quality_judge(client)],
     )
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from mlflow.genai.scorers import scorer
 from mlflow.entities import Feedback
@@ -71,38 +74,93 @@ def contains_keywords(outputs: str, expectations: dict) -> Feedback:
     )
 
 
-# --- LLM Judge（需要 LLM API key 才能使用）---
+# --- LLM Judge（使用 LLMClient）---
 
-def create_tone_judge(model: str = "openai:/gpt-4o-mini"):
-    """建立專業語調 LLM judge。"""
-    from typing import Literal
-    from mlflow.genai.judges import make_judge
+def create_llm_judge(
+    client: Any,
+    *,
+    name: str,
+    instructions: str,
+) -> Any:
+    """建立基於 LLMClient 的 LLM Judge scorer。
 
-    return make_judge(
+    Args:
+        client: LLMClient 實例，需有 chat(system_prompt, user_prompt) 方法。
+        name: Judge 名稱（同時作為 scorer 名稱）。
+        instructions: Judge 評分指示，可使用 {inputs} 和 {outputs} 佔位符。
+
+    Returns:
+        MLflow @scorer 裝飾的評分函式。
+    """
+
+    @scorer
+    def llm_judge(inputs: dict | str, outputs: str) -> Feedback:
+        prompt = instructions.format(
+            inputs=inputs if isinstance(inputs, str) else str(inputs),
+            outputs=outputs,
+        )
+
+        response = client.chat(
+            system_prompt="You are a strict evaluator. Respond with a JSON object containing 'score' (float 0-1) and 'rationale' (string).",
+            user_prompt=prompt,
+        )
+
+        import json
+        try:
+            result = json.loads(response.content)
+            return Feedback(
+                value=float(result.get("score", 0.0)),
+                rationale=result.get("rationale", ""),
+            )
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # 嘗試從回應中提取 yes/no
+            content = response.content.strip().lower()
+            if content in ("yes", "true"):
+                return Feedback(value=1.0, rationale=response.content)
+            elif content in ("no", "false"):
+                return Feedback(value=0.0, rationale=response.content)
+            return Feedback(value=0.5, rationale=f"Unparseable judge response: {response.content}")
+
+    llm_judge.__name__ = name
+    return llm_judge
+
+
+def create_tone_judge(client: Any) -> Any:
+    """建立專業語調 LLM Judge。
+
+    Args:
+        client: LLMClient 實例。
+
+    Returns:
+        MLflow scorer。
+    """
+    return create_llm_judge(
+        client,
         name="professional_tone",
         instructions=(
-            "Evaluate if the response maintains a professional tone.\n"
-            "Output: {{ outputs }}\n"
-            "Return 'yes' if professional, 'no' otherwise."
+            "Evaluate if the following response maintains a professional tone.\n"
+            "Response: {outputs}\n"
+            "Return a JSON with 'score' (1.0 if professional, 0.0 if not) and 'rationale'."
         ),
-        feedback_value_type=Literal["yes", "no"],
-        model=model,
     )
 
 
-def create_quality_judge(model: str = "openai:/gpt-4o-mini"):
-    """建立回答品質 LLM judge。"""
-    from typing import Literal
-    from mlflow.genai.judges import make_judge
+def create_quality_judge(client: Any) -> Any:
+    """建立回答品質 LLM Judge。
 
-    return make_judge(
+    Args:
+        client: LLMClient 實例。
+
+    Returns:
+        MLflow scorer。
+    """
+    return create_llm_judge(
+        client,
         name="answer_quality",
         instructions=(
             "Evaluate if the response correctly and completely answers the question.\n"
-            "Question: {{ inputs }}\n"
-            "Response: {{ outputs }}\n"
-            "Return 'yes' if correct and complete, 'no' otherwise."
+            "Question: {inputs}\n"
+            "Response: {outputs}\n"
+            "Return a JSON with 'score' (1.0 if correct and complete, 0.0 if not) and 'rationale'."
         ),
-        feedback_value_type=Literal["yes", "no"],
-        model=model,
     )

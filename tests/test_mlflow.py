@@ -1,11 +1,12 @@
-"""app.tracking 單元測試。"""
+"""app.logger (MLflow) + app.prompts 單元測試。"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from app.tracking import PromptManager, init_mlflow, is_mlflow_available
+from app.logger import init_mlflow, is_mlflow_available
+from app.prompts import PromptManager
 from app.utils.config import init_config
 
 
