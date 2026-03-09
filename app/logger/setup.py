@@ -110,6 +110,12 @@ def init_mlflow(cfg=None) -> None:
             _loguru_logger.info(f"MLflow active model: {model_name}")
 
         try:
+            mlflow.litellm.autolog()
+            _loguru_logger.info("MLflow LiteLLM autolog enabled")
+        except Exception:
+            _loguru_logger.debug("LiteLLM autolog not available")
+
+        try:
             mlflow.langchain.autolog()
             _loguru_logger.info("MLflow LangChain autolog enabled")
         except Exception:

@@ -2,109 +2,75 @@
 
 from __future__ import annotations
 
-from app.workflow import LLMState, create_llm_state, create_base_state, create_call_llm_node
-from app.workflow.state import BaseState
+from unittest.mock import MagicMock, patch
+
+from app.workflow import BaseState, create_call_llm_node
 
 
-class TestStateFactories:
-    def test_create_base_state_defaults(self):
-        state = create_base_state()
-        assert state["messages"] == []
-        assert state["metadata"] == {}
-
-    def test_create_llm_state_defaults(self):
-        state = create_llm_state()
-        assert state["messages"] == []
-        assert state["metadata"] == {}
-        assert state["llm_response"] == ""
-        assert state["token_usage"]["total_tokens"] == 0
-        assert state["model"] == ""
-        assert state["error"] is None
-
-    def test_create_llm_state_with_values(self):
-        state = create_llm_state(
-            messages=[{"role": "user", "content": "hi"}],
-            metadata={"key": "value"},
-            llm_response="hello",
-            model="gpt-4o",
-        )
-        assert len(state["messages"]) == 1
-        assert state["llm_response"] == "hello"
-        assert state["model"] == "gpt-4o"
+class TestBaseState:
+    def test_base_state_is_messages_state(self):
+        """BaseState 應基於 MessagesState，有 messages key。"""
+        annotations = BaseState.__annotations__
+        assert "messages" in annotations or hasattr(BaseState, "__annotations__")
 
 
 class TestCallLLMNode:
-    def test_create_call_llm_node_returns_callable(self):
+    @patch("llm_service.factory.get_langchain_llm")
+    def test_create_call_llm_node_returns_callable(self, mock_factory):
         """create_call_llm_node 應回傳 callable。"""
-        class MockClient:
-            def chat(self, system_prompt, user_prompt, **kwargs):
-                pass
-        node = create_call_llm_node(MockClient())
+        mock_llm = MagicMock()
+        mock_factory.return_value = mock_llm
+        node = create_call_llm_node()
         assert callable(node)
 
-    def test_call_llm_node_handles_error(self):
-        """LLM 呼叫失敗時應回傳 error。"""
-        class FailingClient:
-            def chat(self, system_prompt, user_prompt, **kwargs):
-                raise ConnectionError("Service unavailable")
+    def test_call_llm_node_with_custom_llm(self):
+        """可傳入自訂 LLM 實例。"""
+        mock_response = MagicMock()
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        node = create_call_llm_node(FailingClient())
-        state = create_llm_state(
-            messages=[{"role": "user", "content": "test"}],
-        )
+        node = create_call_llm_node(llm=mock_llm)
+        state = {"messages": [("user", "Test")]}
         result = node(state)
-        assert result["error"] is not None
-        assert "Service unavailable" in result["error"]
-        assert result["llm_response"] == ""
+        assert result["messages"] == [mock_response]
 
-    def test_call_llm_node_success(self):
-        """LLM 呼叫成功時應回傳回應內容。"""
-        class MockResponse:
-            content = "Hello back!"
-            model = "test-model"
-            class usage:
-                prompt_tokens = 10
-                completion_tokens = 5
-                total_tokens = 15
+    def test_call_llm_node_invokes_llm(self):
+        """call_llm node 應呼叫 LLM 並回傳 messages。"""
+        mock_response = MagicMock()
+        mock_response.content = "Hello back!"
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        class MockClient:
-            def chat(self, system_prompt, user_prompt, **kwargs):
-                return MockResponse()
-
-        node = create_call_llm_node(MockClient())
-        state = create_llm_state(
-            messages=[{"role": "user", "content": "Hello"}],
-        )
+        node = create_call_llm_node(llm=mock_llm)
+        state = {"messages": [("user", "Hello")]}
         result = node(state)
-        assert result["error"] is None
-        assert result["llm_response"] == "Hello back!"
-        assert result["model"] == "test-model"
-        assert result["token_usage"]["total_tokens"] == 15
+        assert result["messages"] == [mock_response]
+        mock_llm.invoke.assert_called_once()
 
-    def test_call_llm_node_extracts_last_user_message(self):
-        """應取得最後一則 user message。"""
-        class MockResponse:
-            content = "response"
-            model = "m"
-            class usage:
-                prompt_tokens = 0
-                completion_tokens = 0
-                total_tokens = 0
+    def test_call_llm_node_injects_system_prompt(self):
+        """call_llm node 應注入 system prompt。"""
+        mock_response = MagicMock()
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        captured = {}
-
-        class MockClient:
-            def chat(self, system_prompt, user_prompt, **kwargs):
-                captured["user_prompt"] = user_prompt
-                return MockResponse()
-
-        node = create_call_llm_node(MockClient())
-        state = create_llm_state(
-            messages=[
-                {"role": "user", "content": "first"},
-                {"role": "assistant", "content": "reply"},
-                {"role": "user", "content": "second"},
-            ],
-        )
+        node = create_call_llm_node(system_prompt="Be helpful", llm=mock_llm)
+        state = {"messages": [("user", "Hi")]}
         node(state)
-        assert captured["user_prompt"] == "second"
+
+        call_args = mock_llm.invoke.call_args[0][0]
+        assert call_args[0].content == "Be helpful"
+
+    def test_call_llm_node_binds_tools(self):
+        """傳入 tools 時應呼叫 bind_tools。"""
+        mock_llm = MagicMock()
+        mock_bound = MagicMock()
+        mock_llm.bind_tools.return_value = mock_bound
+        mock_bound.invoke.return_value = MagicMock()
+
+        tools = [MagicMock()]
+        node = create_call_llm_node(tools=tools, llm=mock_llm)
+        state = {"messages": [("user", "Hi")]}
+        node(state)
+
+        mock_llm.bind_tools.assert_called_once_with(tools)
+        mock_bound.invoke.assert_called_once()

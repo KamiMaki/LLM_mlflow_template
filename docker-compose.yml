@@ -1,0 +1,24 @@
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.10.0
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root ./mlruns
+    volumes:
+      - mlflow_data:/app
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+      - "4317:4317"
+    environment:
+      - PHOENIX_TELEMETRY_ENABLED=false
+
+volumes:
+  mlflow_data:

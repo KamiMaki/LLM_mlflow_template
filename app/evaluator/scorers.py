@@ -1,7 +1,7 @@
 """MLflow GenAI Scorers — 自定義評分器與 LLM Judge。
 
 Rule-based scorers 使用 MLflow @scorer decorator。
-LLM Judge 使用 LLMClient 進行評分，不依賴 make_judge。
+LLM Judge 使用 litellm 進行評分。
 
 Usage:
     from app.evaluator.scorers import response_not_empty, create_quality_judge
@@ -9,7 +9,7 @@ Usage:
     results = mlflow.genai.evaluate(
         data=eval_data,
         predict_fn=my_app,
-        scorers=[response_not_empty, create_quality_judge(client)],
+        scorers=[response_not_empty, create_quality_judge()],
     )
 """
 
@@ -74,24 +74,31 @@ def contains_keywords(outputs: str, expectations: dict) -> Feedback:
     )
 
 
-# --- LLM Judge（使用 LLMClient）---
+# --- LLM Judge（使用 litellm）---
 
 def create_llm_judge(
-    client: Any,
     *,
     name: str,
     instructions: str,
+    config: Any | None = None,
+    **llm_overrides: Any,
 ) -> Any:
-    """建立基於 LLMClient 的 LLM Judge scorer。
+    """建立基於 litellm 的 LLM Judge scorer。
 
     Args:
-        client: LLMClient 實例，需有 chat(system_prompt, user_prompt) 方法。
         name: Judge 名稱（同時作為 scorer 名稱）。
         instructions: Judge 評分指示，可使用 {inputs} 和 {outputs} 佔位符。
+        config: LLMConfig，None 時自動從 llm_config.yaml 載入。
+        **llm_overrides: 傳給 get_litellm_kwargs 的覆寫參數。
 
     Returns:
         MLflow @scorer 裝飾的評分函式。
     """
+    import json
+    import litellm as _litellm
+    from llm_service import get_litellm_kwargs
+
+    kwargs = get_litellm_kwargs(config, **llm_overrides)
 
     @scorer
     def llm_judge(inputs: dict | str, outputs: str) -> Feedback:
@@ -100,62 +107,48 @@ def create_llm_judge(
             outputs=outputs,
         )
 
-        response = client.chat(
-            system_prompt="You are a strict evaluator. Respond with a JSON object containing 'score' (float 0-1) and 'rationale' (string).",
-            user_prompt=prompt,
-        )
+        messages = [
+            {"role": "system", "content": "You are a strict evaluator. Respond with a JSON object containing 'score' (float 0-1) and 'rationale' (string)."},
+            {"role": "user", "content": prompt},
+        ]
 
-        import json
+        response = _litellm.completion(**kwargs, messages=messages)
+        content = response.choices[0].message.content or ""
+
         try:
-            result = json.loads(response.content)
+            result = json.loads(content)
             return Feedback(
                 value=float(result.get("score", 0.0)),
                 rationale=result.get("rationale", ""),
             )
         except (json.JSONDecodeError, KeyError, ValueError):
-            # 嘗試從回應中提取 yes/no
-            content = response.content.strip().lower()
-            if content in ("yes", "true"):
-                return Feedback(value=1.0, rationale=response.content)
-            elif content in ("no", "false"):
-                return Feedback(value=0.0, rationale=response.content)
-            return Feedback(value=0.5, rationale=f"Unparseable judge response: {response.content}")
+            content_lower = content.strip().lower()
+            if content_lower in ("yes", "true"):
+                return Feedback(value=1.0, rationale=content)
+            elif content_lower in ("no", "false"):
+                return Feedback(value=0.0, rationale=content)
+            return Feedback(value=0.5, rationale=f"Unparseable judge response: {content}")
 
     llm_judge.__name__ = name
     return llm_judge
 
 
-def create_tone_judge(client: Any) -> Any:
-    """建立專業語調 LLM Judge。
-
-    Args:
-        client: LLMClient 實例。
-
-    Returns:
-        MLflow scorer。
-    """
+def create_tone_judge(**kwargs: Any) -> Any:
+    """建立專業語調 LLM Judge。"""
     return create_llm_judge(
-        client,
         name="professional_tone",
         instructions=(
             "Evaluate if the following response maintains a professional tone.\n"
             "Response: {outputs}\n"
             "Return a JSON with 'score' (1.0 if professional, 0.0 if not) and 'rationale'."
         ),
+        **kwargs,
     )
 
 
-def create_quality_judge(client: Any) -> Any:
-    """建立回答品質 LLM Judge。
-
-    Args:
-        client: LLMClient 實例。
-
-    Returns:
-        MLflow scorer。
-    """
+def create_quality_judge(**kwargs: Any) -> Any:
+    """建立回答品質 LLM Judge。"""
     return create_llm_judge(
-        client,
         name="answer_quality",
         instructions=(
             "Evaluate if the response correctly and completely answers the question.\n"
@@ -163,4 +156,5 @@ def create_quality_judge(client: Any) -> Any:
             "Response: {outputs}\n"
             "Return a JSON with 'score' (1.0 if correct and complete, 0.0 if not) and 'rationale'."
         ),
+        **kwargs,
     )

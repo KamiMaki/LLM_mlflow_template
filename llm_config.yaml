@@ -1,0 +1,15 @@
+# LLM Service 配置檔
+# 環境變數覆寫: LLM_API_BASE, LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS
+
+# API 連線設定
+api_base: "http://localhost:11434/v1"    # LLM API base URL
+api_key: ""                               # 認證 token（建議用 LLM_API_KEY 環境變數）
+model: "gpt-4o"                           # 預設模型名稱
+
+# 生成參數
+temperature: 0.7
+max_tokens: 4096
+
+# 額外 HTTP headers（內部 API 可能需要）
+# extra_headers:
+#   X-Team-Id: "your-team-id"
