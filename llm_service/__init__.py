@@ -3,7 +3,7 @@
 提供統一配置，輸出各框架原生物件（ChatLiteLLM、Google ADK LiteLlm、litellm kwargs 等）。
 """
 
-from .config import LLMConfig
+from .config import AuthConfig, LLMConfig
 from .factory import get_adk_model, get_langchain_llm, get_litellm_kwargs, get_openai_client
 from .models import LLMResponse, TokenUsage
 
@@ -11,6 +11,7 @@ from .models import LLMResponse, TokenUsage
 from .client import LLMClient
 
 __all__ = [
+    "AuthConfig",
     "LLMConfig",
     "get_langchain_llm",
     "get_adk_model",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from unittest.mock import patch, MagicMock
 
-from llm_service.config import LLMConfig
+from llm_service.config import AuthConfig, LLMConfig
 
 
 class TestLLMConfig:
@@ -119,6 +119,166 @@ class TestFactory:
         call_kwargs = mock_cls.call_args[1]
         assert call_kwargs["base_url"] == "https://test/v1"
         assert call_kwargs["api_key"] == "k"
+
+
+class TestTokenExchange:
+    def test_resolve_api_key_without_auth(self):
+        """沒有 auth 設定時直接回傳 api_key。"""
+        cfg = LLMConfig(api_key="direct-key")
+        assert cfg.resolve_api_key() == "direct-key"
+
+    def test_resolve_api_key_with_auth(self):
+        """設定 auth 時應呼叫 TokenExchanger。"""
+        cfg = LLMConfig(
+            auth=AuthConfig(
+                auth_url="https://auth.test/token",
+                auth_token="j1-token",
+            ),
+        )
+        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2-token"
+            mock_cls.return_value = mock_exchanger
+
+            result = cfg.resolve_api_key()
+            assert result == "j2-token"
+            mock_cls.assert_called_once_with(
+                auth_url="https://auth.test/token",
+                auth_token="j1-token",
+                token_field="access_token",
+                expires_field="expires_in",
+                auth_method="bearer",
+                extra_body={},
+                extra_headers={},
+                buffer_seconds=60,
+            )
+
+    def test_resolve_api_key_caches_exchanger(self):
+        """TokenExchanger 應被快取，第二次呼叫不重建。"""
+        cfg = LLMConfig(
+            auth=AuthConfig(
+                auth_url="https://auth.test/token",
+                auth_token="j1-token",
+            ),
+        )
+        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_cls.return_value = mock_exchanger
+
+            cfg.resolve_api_key()
+            cfg.resolve_api_key()
+            # TokenExchanger 只建立一次
+            mock_cls.assert_called_once()
+            # get_token 呼叫兩次
+            assert mock_exchanger.get_token.call_count == 2
+
+    def test_from_yaml_with_auth(self, tmp_path):
+        """from_yaml 應正確解析 auth 區段。"""
+        yaml_file = tmp_path / "test_config.yaml"
+        yaml_file.write_text(
+            'api_base: "https://llm.test/v1"\n'
+            'model: "gpt-4o"\n'
+            'auth:\n'
+            '  auth_url: "https://auth.test/token"\n'
+            '  auth_token: "j1-from-yaml"\n'
+            '  token_field: "token"\n'
+        )
+        cfg = LLMConfig.from_yaml(str(yaml_file))
+        assert cfg.auth is not None
+        assert cfg.auth.auth_url == "https://auth.test/token"
+        assert cfg.auth.auth_token == "j1-from-yaml"
+        assert cfg.auth.token_field == "token"
+
+    def test_from_yaml_auth_token_env_override(self, tmp_path, monkeypatch):
+        """LLM_AUTH_TOKEN 環境變數應覆寫 auth.auth_token。"""
+        yaml_file = tmp_path / "test_config.yaml"
+        yaml_file.write_text(
+            'auth:\n'
+            '  auth_url: "https://auth.test/token"\n'
+            '  auth_token: "yaml-j1"\n'
+        )
+        monkeypatch.setenv("LLM_AUTH_TOKEN", "env-j1")
+        cfg = LLMConfig.from_yaml(str(yaml_file))
+        assert cfg.auth.auth_token == "env-j1"
+
+    def test_clear_token_cache(self):
+        """clear_token_cache 應清除快取。"""
+        cfg = LLMConfig(
+            auth=AuthConfig(
+                auth_url="https://auth.test/token",
+                auth_token="j1",
+            ),
+        )
+        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_cls.return_value = mock_exchanger
+
+            cfg.resolve_api_key()
+            cfg.clear_token_cache()
+            mock_exchanger.clear_cache.assert_called_once()
+
+
+class TestTokenExchangerUnit:
+    def test_token_exchange_flow(self):
+        """TokenExchanger 應正確交換 token。"""
+        from llm_service.auth import TokenExchanger
+        import httpx
+
+        exchanger = TokenExchanger(
+            auth_url="https://auth.test/token",
+            auth_token="j1-token",
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "access_token": "j2-token-value",
+            "expires_in": 3600,
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            token = exchanger.get_token()
+            assert token == "j2-token-value"
+
+            # 快取生效，不再呼叫 post
+            mock_client.post.reset_mock()
+            token2 = exchanger.get_token()
+            assert token2 == "j2-token-value"
+            mock_client.post.assert_not_called()
+
+    def test_is_expired_initially(self):
+        """初始狀態應為 expired。"""
+        from llm_service.auth import TokenExchanger
+
+        exchanger = TokenExchanger(
+            auth_url="https://auth.test/token",
+            auth_token="j1",
+        )
+        assert exchanger.is_expired is True
+
+    def test_clear_cache(self):
+        """clear_cache 應重置 token。"""
+        from llm_service.auth import TokenExchanger
+
+        exchanger = TokenExchanger(
+            auth_url="https://auth.test/token",
+            auth_token="j1",
+        )
+        exchanger._cached_token = "cached"
+        exchanger._expires_at = 999999999999.0
+
+        assert exchanger.is_expired is False
+        exchanger.clear_cache()
+        assert exchanger.is_expired is True
+        assert exchanger._cached_token is None
 
 
 class TestLLMClientDeprecated:

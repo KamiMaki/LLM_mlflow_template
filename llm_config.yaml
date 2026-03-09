@@ -3,7 +3,7 @@
 
 # API 連線設定
 api_base: "http://localhost:11434/v1"    # LLM API base URL
-api_key: ""                               # 認證 token（建議用 LLM_API_KEY 環境變數）
+api_key: ""                               # 直接 API key（不需 token exchange 時使用）
 model: "gpt-4o"                           # 預設模型名稱
 
 # 生成參數
@@ -13,3 +13,20 @@ max_tokens: 4096
 # 額外 HTTP headers（內部 API 可能需要）
 # extra_headers:
 #   X-Team-Id: "your-team-id"
+
+# === Token Exchange（可選）===
+# 適用於內部 API 需要先用 J1 token 換取 J2 token 的場景。
+# 設定此區段後，factory 會自動進行 token exchange，不需手動處理。
+# J1 token 建議透過 LLM_AUTH_TOKEN 環境變數傳入，避免寫在設定檔中。
+#
+# auth:
+#   auth_url: "https://auth.internal.com/api/token"   # 驗證端點
+#   auth_token: ""                                     # J1 token（或用 LLM_AUTH_TOKEN 環境變數）
+#   token_field: "access_token"                        # 回應 JSON 中 token 欄位
+#   expires_field: "expires_in"                        # 回應 JSON 中過期秒數欄位
+#   auth_method: "bearer"                              # bearer: J1 放 Authorization header
+#                                                      # body: J1 放入 request body
+#   buffer_seconds: 60                                 # 提前幾秒視為過期，自動刷新
+#   extra_body:                                        # 額外 POST body（如 grant_type 等）
+#     grant_type: "client_credentials"
+#   extra_headers: {}                                  # 額外 request headers

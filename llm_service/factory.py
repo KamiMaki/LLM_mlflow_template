@@ -44,7 +44,7 @@ def get_langchain_llm(config: LLMConfig | None = None, **overrides: Any):
     return ChatLiteLLM(
         model=overrides.get("model", cfg.model),
         api_base=cfg.api_base,
-        api_key=cfg.api_key,
+        api_key=cfg.resolve_api_key(),
         temperature=overrides.get("temperature", cfg.temperature),
         max_tokens=overrides.get("max_tokens", cfg.max_tokens),
         model_kwargs={"extra_headers": cfg.extra_headers} if cfg.extra_headers else {},
@@ -70,9 +70,10 @@ def get_adk_model(config: LLMConfig | None = None, **overrides: Any):
     if "/" not in model_name:
         model_name = f"openai/{model_name}"
 
+    api_key = cfg.resolve_api_key()
     headers = {**cfg.extra_headers}
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     return LiteLlm(
         model=model_name,
@@ -100,7 +101,7 @@ def get_litellm_kwargs(config: LLMConfig | None = None, **overrides: Any) -> dic
     return {
         "model": model_name,
         "api_base": cfg.api_base,
-        "api_key": cfg.api_key,
+        "api_key": cfg.resolve_api_key(),
         "temperature": overrides.get("temperature", cfg.temperature),
         "max_tokens": overrides.get("max_tokens", cfg.max_tokens),
         "extra_headers": cfg.extra_headers,
@@ -121,6 +122,6 @@ def get_openai_client(config: LLMConfig | None = None):
     cfg = config or LLMConfig.from_yaml()
     return OpenAI(
         base_url=cfg.api_base,
-        api_key=cfg.api_key,
+        api_key=cfg.resolve_api_key(),
         default_headers=cfg.extra_headers or None,
     )
