@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from app.workflow import BaseState, create_call_llm_node
+from app.workflow import BaseState, WorkflowState, create_call_llm_node, create_set_model_node, create_prompt_assembly_node
 
 
 class TestBaseState:
@@ -12,6 +12,19 @@ class TestBaseState:
         """BaseState 應基於 MessagesState，有 messages key。"""
         annotations = BaseState.__annotations__
         assert "messages" in annotations or hasattr(BaseState, "__annotations__")
+
+
+class TestWorkflowState:
+    def test_workflow_state_fields(self):
+        """WorkflowState 應有多模型相關欄位。"""
+        fields = WorkflowState.__annotations__
+        assert "llm_config" in fields
+        assert "prompt_template" in fields
+        assert "prompt_variables" in fields
+        assert "model_alias" in fields
+        assert "zone" in fields
+        assert "image_base64" in fields
+        assert "metadata" in fields
 
 
 class TestCallLLMNode:
@@ -74,3 +87,58 @@ class TestCallLLMNode:
 
         mock_llm.bind_tools.assert_called_once_with(tools)
         mock_bound.invoke.assert_called_once()
+
+    @patch("llm_service.get_langchain_llm")
+    def test_call_llm_node_uses_state_config(self, mock_factory):
+        """call_llm node 應從 state 取得 llm_config 和 model_alias。"""
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock()
+        mock_factory.return_value = mock_llm
+
+        node = create_call_llm_node()
+        mock_config = MagicMock()
+        state = {
+            "messages": [("user", "Hi")],
+            "llm_config": mock_config,
+            "model_alias": "QWEN3",
+            "zone": "PROD",
+        }
+        node(state)
+
+        mock_factory.assert_called_once_with(
+            config=mock_config,
+            model_alias="QWEN3",
+            zone="PROD",
+        )
+
+
+class TestSetModelNode:
+    def test_set_model_returns_model_alias(self):
+        """create_set_model_node 應回傳更新 model_alias 的 dict。"""
+        node = create_set_model_node("QWEN3VL")
+        result = node({})
+        assert result == {"model_alias": "QWEN3VL"}
+
+
+class TestPromptAssemblyNode:
+    def test_assemble_with_template_and_variables(self):
+        """prompt_assembly_node 應格式化 template。"""
+        node = create_prompt_assembly_node(prompt_template="Hello {{ name }}")
+        result = node({"prompt_variables": {"name": "World"}})
+        assert len(result["messages"]) == 1
+        assert "Hello World" in result["messages"][0].content
+
+    def test_assemble_with_state_template(self):
+        """應優先使用 state 中的 prompt_template。"""
+        node = create_prompt_assembly_node()
+        result = node({
+            "prompt_template": "State template {{ x }}",
+            "prompt_variables": {"x": "42"},
+        })
+        assert "State template 42" in result["messages"][0].content
+
+    def test_assemble_returns_empty_without_template(self):
+        """沒有 template 時應回傳空 dict。"""
+        node = create_prompt_assembly_node()
+        result = node({})
+        assert result == {}

@@ -1,24 +1,23 @@
-"""LLM 配置核心 — 使用 Pydantic 管理 LLM 連線與參數設定。
+"""LLM 配置核心 — 多模型 + 多環境（DEV/TEST/STG/PROD）支援。
 
-支援 YAML 檔案載入 + 環境變數覆寫（ENV 優先級最高）。
-支援 Token Exchange（J1→J2）：設定 auth 區段即可自動換 token。
+使用 Pydantic 管理 LLM 連線與參數設定，強制 J1→J2 token exchange 驗證。
+支援 shared_config（共用 auth URL 分 zone）+ model_configs（各模型獨立設定）。
 
 Usage:
     from llm_service.config import LLMConfig
 
+    # 從 YAML 載入（推薦）
     cfg = LLMConfig.from_yaml("llm_config.yaml")
-    cfg = LLMConfig(api_base="https://...", api_key="...", model="gpt-4o")
 
-    # 需要 token exchange 時
-    cfg = LLMConfig(
-        api_base="https://llm-api.internal.com/v1",
-        auth=AuthConfig(
-            auth_url="https://auth.internal.com/token",
-            auth_token="your-j1-token",
-        ),
-        model="gpt-4o",
-    )
-    api_key = cfg.resolve_api_key()  # 自動用 J1 換 J2
+    # 取得指定模型的已解析設定
+    resolved = cfg.resolve("QWEN3")        # 使用 default_zone
+    resolved = cfg.resolve("QWEN3", zone="PROD")  # 指定 zone
+
+    # 取得 API key（自動 J1→J2 exchange）
+    api_key = resolved.api_key  # 已完成 token exchange
+
+    # 切換模型
+    resolved_vl = cfg.resolve("QWEN3VL")
 """
 
 from __future__ import annotations
@@ -28,14 +27,135 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+VALID_ZONES = {"DEV", "TEST", "STG", "PROD"}
+
+
+class SharedConfig(BaseModel):
+    """全域共用設定 — J1→J2 auth URL（分 zone）與 token exchange 參數。"""
+
+    default_zone: str = Field(default="DEV", description="預設 zone（DEV/TEST/STG/PROD）")
+    auth_urls: dict[str, str] = Field(
+        default_factory=dict,
+        description="各 zone 的 J1→J2 Token Exchange 端點",
+    )
+
+    # Token Exchange 共用參數
+    token_field: str = Field(default="access_token", description="回應 JSON 中 token 欄位名稱")
+    expires_field: str = Field(default="expires_in", description="回應 JSON 中過期秒數欄位名稱")
+    auth_method: str = Field(default="bearer", description="認證方式: bearer 或 body")
+    buffer_seconds: int = Field(default=60, description="提前幾秒視為過期")
+    extra_body: dict[str, Any] = Field(default_factory=dict, description="額外 POST body")
+    extra_headers: dict[str, str] = Field(default_factory=dict, description="額外 HTTP headers")
+
+    @field_validator("default_zone", mode="before")
+    @classmethod
+    def _normalize_zone(cls, v: str) -> str:
+        v = str(v).upper()
+        if v not in VALID_ZONES:
+            raise ValueError(f"Invalid zone '{v}', must be one of {VALID_ZONES}")
+        return v
+
+    @field_validator("extra_body", mode="before")
+    @classmethod
+    def _coerce_extra_body(cls, v):
+        return v or {}
+
+    @field_validator("extra_headers", mode="before")
+    @classmethod
+    def _coerce_extra_headers(cls, v):
+        return v or {}
+
+    def get_auth_url(self, zone: str | None = None) -> str:
+        """取得指定 zone 的 auth URL。"""
+        z = (zone or self.default_zone).upper()
+        if z not in self.auth_urls:
+            raise ValueError(
+                f"No auth_url configured for zone '{z}'. "
+                f"Available zones: {list(self.auth_urls.keys())}"
+            )
+        return self.auth_urls[z]
+
+
+class ModelConfig(BaseModel):
+    """單一模型設定 — J1 token、各 zone endpoint、模型名稱與超參數。"""
+
+    j1_token: str = Field(default="", description="J1 token，建議用環境變數傳入")
+    model_name: str = Field(description="LiteLLM 模型名稱")
+
+    api_endpoints: dict[str, str] = Field(
+        default_factory=dict,
+        description="各 zone 的 API endpoint",
+    )
+
+    # 超參數
+    max_tokens: int = Field(default=4096, description="最大生成 token 數")
+    temperature: float = Field(default=0.7, description="生成溫度")
+    top_p: float | None = Field(default=None, description="Top-p sampling")
+    top_k: int | None = Field(default=None, description="Top-k sampling")
+    frequency_penalty: float | None = Field(default=None, description="頻率懲罰")
+    presence_penalty: float | None = Field(default=None, description="存在懲罰")
+    stop: list[str] | None = Field(default=None, description="停止序列")
+
+    # 模型專用額外 headers
+    extra_headers: dict[str, str] = Field(default_factory=dict, description="模型專用額外 headers")
+
+    @field_validator("extra_headers", mode="before")
+    @classmethod
+    def _coerce_extra_headers(cls, v):
+        return v or {}
+
+    def get_api_endpoint(self, zone: str) -> str:
+        """取得指定 zone 的 API endpoint。"""
+        z = zone.upper()
+        if z not in self.api_endpoints:
+            raise ValueError(
+                f"No api_endpoint configured for zone '{z}'. "
+                f"Available zones: {list(self.api_endpoints.keys())}"
+            )
+        return self.api_endpoints[z]
+
+    def get_hyperparams(self) -> dict[str, Any]:
+        """取得所有已設定的超參數（排除 None）。"""
+        params: dict[str, Any] = {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if self.top_p is not None:
+            params["top_p"] = self.top_p
+        if self.top_k is not None:
+            params["top_k"] = self.top_k
+        if self.frequency_penalty is not None:
+            params["frequency_penalty"] = self.frequency_penalty
+        if self.presence_penalty is not None:
+            params["presence_penalty"] = self.presence_penalty
+        if self.stop is not None:
+            params["stop"] = self.stop
+        return params
+
+
+class ResolvedModelConfig(BaseModel):
+    """已解析的模型設定 — 包含具體的 api_base、api_key 與所有參數，可直接用於建立 LLM client。"""
+
+    model_name: str
+    api_base: str
+    api_key: str = ""
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    hyperparams: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+# --- 向後相容：保留 AuthConfig 供直接使用 ---
 
 class AuthConfig(BaseModel):
-    """Token Exchange 配置 — 用 J1 token 換取 J2 token。"""
+    """Token Exchange 配置 — 用 J1 token 換取 J2 token（向後相容）。"""
 
     auth_url: str = Field(description="驗證端點 URL")
-    auth_token: str = Field(default="", description="初始 token (J1)，可用 LLM_AUTH_TOKEN 環境變數覆寫")
+    auth_token: str = Field(default="", description="初始 token (J1)")
     token_field: str = Field(default="access_token", description="回應 JSON 中 token 欄位名稱")
     expires_field: str = Field(default="expires_in", description="回應 JSON 中過期秒數欄位名稱")
     auth_method: str = Field(default="bearer", description="認證方式: bearer 或 body")
@@ -55,20 +175,27 @@ class AuthConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM 服務連線與參數配置。"""
+    """LLM 服務配置 — 多模型 + 多環境。
 
-    api_base: str = Field(default="http://localhost:11434/v1", description="API base URL")
-    api_key: str = Field(default="", description="直接使用的 API key（不需 token exchange 時）")
-    model: str = Field(default="gpt-4o", description="預設模型名稱")
+    新版結構：shared_config + model_configs。
+    同時向後相容舊版單一模型設定（api_base, api_key, model 等）。
+    """
+
+    # 新版：多模型 + 多環境
+    shared_config: SharedConfig = Field(default_factory=SharedConfig)
+    model_configs: dict[str, ModelConfig] = Field(default_factory=dict)
+
+    # 向後相容：舊版單一模型設定
+    api_base: str = Field(default="", description="API base URL（向後相容）")
+    api_key: str = Field(default="", description="直接 API key（向後相容）")
+    model: str = Field(default="", description="預設模型名稱（向後相容）")
     temperature: float = 0.7
     max_tokens: int = 4096
-    extra_headers: dict[str, str] = Field(default_factory=dict, description="額外 HTTP headers")
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    auth: AuthConfig | None = Field(default=None, description="Token exchange（向後相容）")
 
-    # Token Exchange（可選）
-    auth: AuthConfig | None = Field(default=None, description="Token exchange 設定，設定後自動用 J1 換 J2")
-
-    # 內部快取 TokenExchanger（不序列化）
-    _exchanger: Any = None
+    # 內部快取：model_alias -> TokenExchanger
+    _exchangers: dict[str, Any] = {}
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -77,21 +204,126 @@ class LLMConfig(BaseModel):
     def _coerce_extra_headers(cls, v):
         return v or {}
 
-    def resolve_api_key(self) -> str:
-        """取得有效的 API key。
+    @model_validator(mode="after")
+    def _validate_config(self):
+        """驗證：新版設定必須至少有一個 model_config 且每個都有 auth_url。"""
+        if self.model_configs:
+            if not self.shared_config.auth_urls:
+                raise ValueError(
+                    "shared_config.auth_urls is required when using model_configs. "
+                    "At least one zone auth URL must be configured."
+                )
+            default_zone = self.shared_config.default_zone
+            for name, mcfg in self.model_configs.items():
+                if default_zone not in mcfg.api_endpoints:
+                    raise ValueError(
+                        f"Model '{name}' missing api_endpoint for default zone '{default_zone}'. "
+                        f"Available zones: {list(mcfg.api_endpoints.keys())}"
+                    )
+        return self
 
-        若設定了 auth（token exchange），自動用 J1 換取 J2 並回傳。
-        否則直接回傳 api_key。
+    def list_models(self) -> list[str]:
+        """列出所有已設定的模型別名。"""
+        return list(self.model_configs.keys())
+
+    def get_model_config(self, model_alias: str) -> ModelConfig:
+        """取得指定模型的原始設定。"""
+        if model_alias not in self.model_configs:
+            raise KeyError(
+                f"Model '{model_alias}' not found. "
+                f"Available models: {self.list_models()}"
+            )
+        return self.model_configs[model_alias]
+
+    def resolve(self, model_alias: str, zone: str | None = None) -> ResolvedModelConfig:
+        """解析指定模型 + zone 的完整設定，自動執行 J1→J2 token exchange。
+
+        Args:
+            model_alias: 模型別名（如 "QWEN3"）。
+            zone: 環境 zone，None 時使用 shared_config.default_zone。
 
         Returns:
-            可用於 LLM API 呼叫的 token 字串。
+            ResolvedModelConfig，包含可直接使用的 api_base、api_key 等。
         """
+        z = (zone or os.getenv("LLM_ZONE") or self.shared_config.default_zone).upper()
+
+        mcfg = self.get_model_config(model_alias)
+        api_base = mcfg.get_api_endpoint(z)
+        auth_url = self.shared_config.get_auth_url(z)
+
+        j1_token = (
+            os.getenv(f"LLM_AUTH_TOKEN_{model_alias}")
+            or os.getenv("LLM_AUTH_TOKEN")
+            or mcfg.j1_token
+        )
+        if not j1_token:
+            raise ValueError(
+                f"No J1 token for model '{model_alias}'. "
+                f"Set LLM_AUTH_TOKEN_{model_alias} or LLM_AUTH_TOKEN env var, "
+                f"or configure j1_token in llm_config.yaml."
+            )
+
+        api_key = self._exchange_token(model_alias, auth_url, j1_token)
+
+        merged_headers = {**self.shared_config.extra_headers, **mcfg.extra_headers}
+
+        return ResolvedModelConfig(
+            model_name=mcfg.model_name,
+            api_base=api_base,
+            api_key=api_key,
+            temperature=mcfg.temperature,
+            max_tokens=mcfg.max_tokens,
+            extra_headers=merged_headers,
+            hyperparams=mcfg.get_hyperparams(),
+        )
+
+    def _exchange_token(self, cache_key: str, auth_url: str, j1_token: str) -> str:
+        """執行 J1→J2 token exchange（自動快取）。"""
+        from llm_service.auth import TokenExchanger
+
+        if cache_key not in self._exchangers:
+            self._exchangers[cache_key] = TokenExchanger(
+                auth_url=auth_url,
+                auth_token=j1_token,
+                token_field=self.shared_config.token_field,
+                expires_field=self.shared_config.expires_field,
+                auth_method=self.shared_config.auth_method,
+                extra_body=self.shared_config.extra_body,
+                extra_headers=self.shared_config.extra_headers,
+                buffer_seconds=self.shared_config.buffer_seconds,
+            )
+
+        return self._exchangers[cache_key].get_token()
+
+    def clear_token_cache(self, model_alias: str | None = None) -> None:
+        """清除 token exchange 快取。"""
+        if model_alias:
+            if model_alias in self._exchangers:
+                self._exchangers[model_alias].clear_cache()
+        else:
+            for exchanger in self._exchangers.values():
+                exchanger.clear_cache()
+            self._exchangers.clear()
+
+    # --- 向後相容 ---
+
+    def resolve_api_key(self) -> str:
+        """向後相容：取得有效的 API key。
+
+        若有 model_configs，使用第一個模型。
+        否則走舊版 auth/api_key 邏輯。
+        """
+        if self.model_configs:
+            first_model = next(iter(self.model_configs))
+            resolved = self.resolve(first_model)
+            return resolved.api_key
+
         if self.auth is None:
             return self.api_key
 
-        if self._exchanger is None:
+        if "_legacy" not in self._exchangers:
             from llm_service.auth import TokenExchanger
-            self._exchanger = TokenExchanger(
+            self._exchangers["_legacy"] = TokenExchanger(
                 auth_url=self.auth.auth_url,
                 auth_token=self.auth.auth_token,
                 token_field=self.auth.token_field,
@@ -102,30 +334,39 @@ class LLMConfig(BaseModel):
                 buffer_seconds=self.auth.buffer_seconds,
             )
 
-        return self._exchanger.get_token()
-
-    def clear_token_cache(self) -> None:
-        """清除 token exchange 快取，下次會重新交換。"""
-        if self._exchanger is not None:
-            self._exchanger.clear_cache()
+        return self._exchangers["_legacy"].get_token()
 
     @classmethod
     def from_yaml(cls, path: str | Path = "llm_config.yaml") -> LLMConfig:
         """從 YAML 載入設定，再用環境變數覆寫。
 
         環境變數對應:
-            LLM_API_BASE    -> api_base
-            LLM_API_KEY     -> api_key
-            LLM_MODEL       -> model
-            LLM_TEMPERATURE -> temperature
-            LLM_MAX_TOKENS  -> max_tokens
-            LLM_AUTH_TOKEN  -> auth.auth_token（J1 token）
+            LLM_ZONE          -> shared_config.default_zone
+            LLM_AUTH_TOKEN     -> 各模型的 fallback J1 token
+            LLM_AUTH_TOKEN_XXX -> 指定模型 XXX 的 J1 token
+            LLM_API_BASE       -> api_base（向後相容）
+            LLM_API_KEY        -> api_key（向後相容）
+            LLM_MODEL          -> model（向後相容）
+            LLM_TEMPERATURE    -> temperature（向後相容）
+            LLM_MAX_TOKENS     -> max_tokens（向後相容）
         """
         data: dict[str, Any] = {}
         path = Path(path)
         if path.exists():
             with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
+
+        zone_env = os.getenv("LLM_ZONE")
+        if zone_env:
+            if "shared_config" not in data:
+                data["shared_config"] = {}
+            data["shared_config"]["default_zone"] = zone_env
+
+        if "model_configs" in data:
+            for model_alias in data["model_configs"]:
+                token_env = os.getenv(f"LLM_AUTH_TOKEN_{model_alias}")
+                if token_env:
+                    data["model_configs"][model_alias]["j1_token"] = token_env
 
         env_map = {
             "LLM_API_BASE": "api_base",
@@ -139,7 +380,6 @@ class LLMConfig(BaseModel):
             if val:
                 data[field_name] = val
 
-        # auth.auth_token 環境變數覆寫
         auth_token_env = os.getenv("LLM_AUTH_TOKEN")
         if auth_token_env and "auth" in data and isinstance(data["auth"], dict):
             data["auth"]["auth_token"] = auth_token_env

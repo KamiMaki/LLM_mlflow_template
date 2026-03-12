@@ -1,32 +1,85 @@
-# LLM Service 配置檔
-# 環境變數覆寫: LLM_API_BASE, LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS
-
-# API 連線設定
-api_base: "http://localhost:11434/v1"    # LLM API base URL
-api_key: ""                               # 直接 API key（不需 token exchange 時使用）
-model: "gpt-4o"                           # 預設模型名稱
-
-# 生成參數
-temperature: 0.7
-max_tokens: 4096
-
-# 額外 HTTP headers（內部 API 可能需要）
-# extra_headers:
-#   X-Team-Id: "your-team-id"
-
-# === Token Exchange（可選）===
-# 適用於內部 API 需要先用 J1 token 換取 J2 token 的場景。
-# 設定此區段後，factory 會自動進行 token exchange，不需手動處理。
-# J1 token 建議透過 LLM_AUTH_TOKEN 環境變數傳入，避免寫在設定檔中。
+# LLM Service 配置檔 — 多模型 + 多環境支援
+# 環境變數覆寫: LLM_ZONE, LLM_AUTH_TOKEN
 #
-# auth:
-#   auth_url: "https://auth.internal.com/api/token"   # 驗證端點
-#   auth_token: ""                                     # J1 token（或用 LLM_AUTH_TOKEN 環境變數）
-#   token_field: "access_token"                        # 回應 JSON 中 token 欄位
-#   expires_field: "expires_in"                        # 回應 JSON 中過期秒數欄位
-#   auth_method: "bearer"                              # bearer: J1 放 Authorization header
-#                                                      # body: J1 放入 request body
-#   buffer_seconds: 60                                 # 提前幾秒視為過期，自動刷新
-#   extra_body:                                        # 額外 POST body（如 grant_type 等）
-#     grant_type: "client_credentials"
-#   extra_headers: {}                                  # 額外 request headers
+# 結構：
+#   shared_config  — 全域共用設定（J1→J2 auth URL 分四個 zone）
+#   model_configs  — 各模型獨立設定（token、endpoint、超參數）
+
+# === 共用設定 ===
+shared_config:
+  # 預設使用的環境 zone（DEV / TEST / STG / PROD），可用 LLM_ZONE 環境變數覆寫
+  default_zone: "DEV"
+
+  # J1→J2 Token Exchange 端點（每個 zone 各一個）
+  auth_urls:
+    DEV:  "https://auth-dev.internal.com/api/token"
+    TEST: "https://auth-test.internal.com/api/token"
+    STG:  "https://auth-stg.internal.com/api/token"
+    PROD: "https://auth-prod.internal.com/api/token"
+
+  # Token Exchange 共用參數
+  token_field: "access_token"
+  expires_field: "expires_in"
+  auth_method: "bearer"          # bearer | body
+  buffer_seconds: 60
+
+  # 額外 POST body（如 grant_type）
+  # extra_body:
+  #   grant_type: "client_credentials"
+
+  # 額外 HTTP headers（所有模型共用）
+  # extra_headers:
+  #   X-Team-Id: "your-team-id"
+
+
+# === 模型設定 ===
+# 每個 key 是模型別名，在 workflow 中透過 set_model("QWEN3") 切換。
+model_configs:
+  QWEN3:
+    # J1 Token — 建議用 LLM_AUTH_TOKEN_QWEN3 環境變數傳入
+    j1_token: ""
+
+    # 模型名稱（傳給 LiteLLM 的 model 參數）
+    model_name: "qwen3"
+
+    # 各 zone 的 API endpoint
+    api_endpoints:
+      DEV:  "https://llm-dev.internal.com/v1"
+      TEST: "https://llm-test.internal.com/v1"
+      STG:  "https://llm-stg.internal.com/v1"
+      PROD: "https://llm-prod.internal.com/v1"
+
+    # 模型超參數
+    max_tokens: 4096
+    temperature: 0.7
+    # top_p: 0.9
+    # top_k: 50
+    # frequency_penalty: 0.0
+    # presence_penalty: 0.0
+    # stop: ["\n\n"]
+
+  QWEN3VL:
+    j1_token: ""
+    model_name: "qwen3-vl"
+
+    api_endpoints:
+      DEV:  "https://llm-vl-dev.internal.com/v1"
+      TEST: "https://llm-vl-test.internal.com/v1"
+      STG:  "https://llm-vl-stg.internal.com/v1"
+      PROD: "https://llm-vl-prod.internal.com/v1"
+
+    max_tokens: 4096
+    temperature: 0.3
+    # VL 模型支援圖片輸入，在 message content 中帶入 base64 image
+
+  # 新增模型範例：
+  # GPT4O:
+  #   j1_token: ""
+  #   model_name: "gpt-4o"
+  #   api_endpoints:
+  #     DEV:  "https://openai-dev.internal.com/v1"
+  #     TEST: "https://openai-test.internal.com/v1"
+  #     STG:  "https://openai-stg.internal.com/v1"
+  #     PROD: "https://openai-prod.internal.com/v1"
+  #   max_tokens: 8192
+  #   temperature: 0.5
