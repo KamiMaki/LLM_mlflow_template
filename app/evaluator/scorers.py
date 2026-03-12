@@ -89,16 +89,15 @@ def create_llm_judge(
         name: Judge 名稱（同時作為 scorer 名稱）。
         instructions: Judge 評分指示，可使用 {inputs} 和 {outputs} 佔位符。
         config: LLMConfig，None 時自動從 llm_config.yaml 載入。
-        **llm_overrides: 傳給 get_litellm_kwargs 的覆寫參數。
+        **llm_overrides: 傳給 LLMService.call_llm 的覆寫參數。
 
     Returns:
         MLflow @scorer 裝飾的評分函式。
     """
     import json
-    import litellm as _litellm
-    from llm_service import get_litellm_kwargs
+    from llm_service import LLMService
 
-    kwargs = get_litellm_kwargs(config, **llm_overrides)
+    service = LLMService(config=config) if config else LLMService()
 
     @scorer
     def llm_judge(inputs: dict | str, outputs: str) -> Feedback:
@@ -107,13 +106,12 @@ def create_llm_judge(
             outputs=outputs,
         )
 
-        messages = [
-            {"role": "system", "content": "You are a strict evaluator. Respond with a JSON object containing 'score' (float 0-1) and 'rationale' (string)."},
-            {"role": "user", "content": prompt},
-        ]
-
-        response = _litellm.completion(**kwargs, messages=messages)
-        content = response.choices[0].message.content or ""
+        response = service.call_llm(
+            user_prompt=prompt,
+            system_prompt="You are a strict evaluator. Respond with a JSON object containing 'score' (float 0-1) and 'rationale' (string).",
+            **llm_overrides,
+        )
+        content = response.content
 
         try:
             result = json.loads(content)

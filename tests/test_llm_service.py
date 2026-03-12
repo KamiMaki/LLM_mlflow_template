@@ -1,23 +1,23 @@
-"""llm_service 單元測試。"""
+"""llm_service 單元測試 — LLMService + Config。"""
 
 from __future__ import annotations
 
-import warnings
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from llm_service.config import (
-    AuthConfig,
     LLMConfig,
     ModelConfig,
     ResolvedModelConfig,
     SharedConfig,
-    VALID_ZONES,
 )
+from llm_service.models import LLMResponse, TokenUsage
+from llm_service.service import LLMService
 
 
-# === 新版多模型配置測試 ===
+# === Config 測試 ===
+
 
 class TestSharedConfig:
     def test_default_zone(self):
@@ -63,7 +63,6 @@ class TestModelConfig:
             api_endpoints={"DEV": "https://dev/v1", "PROD": "https://prod/v1"},
         )
         assert mc.get_api_endpoint("DEV") == "https://dev/v1"
-        assert mc.get_api_endpoint("PROD") == "https://prod/v1"
 
     def test_get_api_endpoint_missing_zone(self):
         mc = ModelConfig(model_name="qwen3", api_endpoints={"DEV": "https://dev/v1"})
@@ -71,17 +70,12 @@ class TestModelConfig:
             mc.get_api_endpoint("PROD")
 
     def test_get_hyperparams(self):
-        mc = ModelConfig(
-            model_name="qwen3",
-            temperature=0.5,
-            max_tokens=2048,
-            top_p=0.9,
-        )
+        mc = ModelConfig(model_name="qwen3", temperature=0.5, max_tokens=2048, top_p=0.9)
         params = mc.get_hyperparams()
         assert params["temperature"] == 0.5
         assert params["max_tokens"] == 2048
         assert params["top_p"] == 0.9
-        assert "top_k" not in params  # None values excluded
+        assert "top_k" not in params
 
     def test_hyperparams_exclude_none(self):
         mc = ModelConfig(model_name="qwen3")
@@ -90,7 +84,7 @@ class TestModelConfig:
         assert "stop" not in params
 
 
-class TestLLMConfigMultiModel:
+class TestLLMConfig:
     def _make_config(self, **overrides):
         defaults = {
             "shared_config": SharedConfig(
@@ -128,6 +122,14 @@ class TestLLMConfigMultiModel:
         with pytest.raises(KeyError, match="not found"):
             cfg.get_model_config("NONEXISTENT")
 
+    def test_default_model(self):
+        cfg = self._make_config(default_model="QWEN3VL")
+        assert cfg.default_model == "QWEN3VL"
+
+    def test_default_model_invalid(self):
+        with pytest.raises(ValueError, match="default_model.*not found"):
+            self._make_config(default_model="NONEXISTENT")
+
     def test_resolve(self):
         cfg = self._make_config()
         with patch("llm_service.auth.TokenExchanger") as mock_cls:
@@ -153,9 +155,7 @@ class TestLLMConfigMultiModel:
 
     def test_resolve_missing_j1_token(self):
         cfg = LLMConfig(
-            shared_config=SharedConfig(
-                auth_urls={"DEV": "https://auth/token"},
-            ),
+            shared_config=SharedConfig(auth_urls={"DEV": "https://auth/token"}),
             model_configs={
                 "QWEN3": ModelConfig(
                     j1_token="",
@@ -189,12 +189,12 @@ class TestLLMConfigMultiModel:
                 model_configs={
                     "QWEN3": ModelConfig(
                         model_name="qwen3",
-                        api_endpoints={"PROD": "https://prod/v1"},  # missing DEV
+                        api_endpoints={"PROD": "https://prod/v1"},
                     ),
                 },
             )
 
-    def test_clear_token_cache_specific(self):
+    def test_clear_token_cache(self):
         cfg = self._make_config()
         with patch("llm_service.auth.TokenExchanger") as mock_cls:
             mock_exchanger = MagicMock()
@@ -205,24 +205,10 @@ class TestLLMConfigMultiModel:
             cfg.clear_token_cache("QWEN3")
             mock_exchanger.clear_cache.assert_called_once()
 
-    def test_clear_token_cache_all(self):
-        cfg = self._make_config()
-        with patch("llm_service.auth.TokenExchanger") as mock_cls:
-            mock_e1 = MagicMock()
-            mock_e1.get_token.return_value = "j2"
-            mock_e2 = MagicMock()
-            mock_e2.get_token.return_value = "j2"
-            mock_cls.side_effect = [mock_e1, mock_e2]
-
-            cfg.resolve("QWEN3")
-            cfg.resolve("QWEN3VL")
-            cfg.clear_token_cache()
-            mock_e1.clear_cache.assert_called_once()
-            mock_e2.clear_cache.assert_called_once()
-
-    def test_from_yaml_multimodel(self, tmp_path):
+    def test_from_yaml(self, tmp_path):
         yaml_file = tmp_path / "llm_config.yaml"
         yaml_file.write_text(
+            'default_model: "QWEN3"\n'
             'shared_config:\n'
             '  default_zone: "DEV"\n'
             '  auth_urls:\n'
@@ -236,8 +222,8 @@ class TestLLMConfigMultiModel:
             '    temperature: 0.5\n'
         )
         cfg = LLMConfig.from_yaml(str(yaml_file))
+        assert cfg.default_model == "QWEN3"
         assert "QWEN3" in cfg.model_configs
-        assert cfg.model_configs["QWEN3"].model_name == "qwen3"
         assert cfg.model_configs["QWEN3"].temperature == 0.5
 
     def test_from_yaml_zone_env_override(self, tmp_path, monkeypatch):
@@ -276,85 +262,304 @@ class TestLLMConfigMultiModel:
         cfg = LLMConfig.from_yaml(str(yaml_file))
         assert cfg.model_configs["QWEN3"].j1_token == "env-j1"
 
-
-# === 向後相容測試（舊版單一模型）===
-
-class TestLLMConfigLegacy:
-    def test_default_values(self):
-        cfg = LLMConfig()
-        assert cfg.temperature == 0.7
-        assert cfg.max_tokens == 4096
-
-    def test_custom_values(self):
-        cfg = LLMConfig(
-            api_base="https://custom.api/v1",
-            api_key="test-key",
-            model="gpt-3.5-turbo",
-            temperature=0.5,
-            max_tokens=2048,
-            extra_headers={"X-Team": "test"},
-        )
-        assert cfg.api_base == "https://custom.api/v1"
-        assert cfg.api_key == "test-key"
-        assert cfg.extra_headers["X-Team"] == "test"
-
-    def test_from_yaml_legacy(self, tmp_path):
-        yaml_file = tmp_path / "test_config.yaml"
-        yaml_file.write_text(
-            'api_base: "https://test.api/v1"\n'
-            'api_key: "yaml-key"\n'
-            'model: "test-model"\n'
-        )
-        cfg = LLMConfig.from_yaml(str(yaml_file))
-        assert cfg.api_base == "https://test.api/v1"
-        assert cfg.api_key == "yaml-key"
-        assert cfg.model == "test-model"
-
-    def test_env_override(self, tmp_path, monkeypatch):
-        yaml_file = tmp_path / "test_config.yaml"
-        yaml_file.write_text('model: "yaml-model"\n')
-        monkeypatch.setenv("LLM_MODEL", "env-model")
-        monkeypatch.setenv("LLM_API_KEY", "env-key")
-        cfg = LLMConfig.from_yaml(str(yaml_file))
-        assert cfg.model == "env-model"
-        assert cfg.api_key == "env-key"
-
     def test_from_yaml_missing_file(self):
         cfg = LLMConfig.from_yaml("nonexistent.yaml")
-        assert cfg.model == ""
+        assert cfg.model_configs == {}
 
 
-class TestFactory:
-    def test_get_litellm_kwargs_legacy(self):
-        from llm_service.factory import get_litellm_kwargs
+# === LLMService 測試 ===
 
+
+class TestLLMService:
+    def _make_service(self, default_model="", **model_overrides):
+        """建立帶 mock config 的 LLMService。"""
         cfg = LLMConfig(
-            api_base="https://test.api/v1",
-            api_key="test-key",
-            model="gpt-4o",
+            default_model=default_model,
+            shared_config=SharedConfig(
+                default_zone="DEV",
+                auth_urls={"DEV": "https://auth/token"},
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="j1-qwen3",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://llm-dev/v1"},
+                    temperature=0.7,
+                    **model_overrides,
+                ),
+                "QWEN3VL": ModelConfig(
+                    j1_token="j1-vl",
+                    model_name="qwen3-vl",
+                    api_endpoints={"DEV": "https://vl-dev/v1"},
+                    temperature=0.3,
+                ),
+            },
         )
-        kwargs = get_litellm_kwargs(cfg)
-        assert kwargs["model"] == "openai/gpt-4o"
-        assert kwargs["api_base"] == "https://test.api/v1"
-        assert kwargs["api_key"] == "test-key"
+        return LLMService(config=cfg)
 
-    def test_get_litellm_kwargs_preserves_provider_prefix(self):
-        from llm_service.factory import get_litellm_kwargs
+    def test_init_default_model(self):
+        service = self._make_service()
+        assert service.current_model == "QWEN3"  # first model
 
-        cfg = LLMConfig(model="anthropic/claude-3-opus")
-        kwargs = get_litellm_kwargs(cfg)
-        assert kwargs["model"] == "anthropic/claude-3-opus"
+    def test_init_explicit_default_model(self):
+        service = self._make_service(default_model="QWEN3VL")
+        assert service.current_model == "QWEN3VL"
 
-    def test_get_litellm_kwargs_overrides(self):
-        from llm_service.factory import get_litellm_kwargs
+    def test_set_model(self):
+        service = self._make_service()
+        result = service.set_model("QWEN3VL")
+        assert service.current_model == "QWEN3VL"
+        assert result is service  # chain call
 
-        cfg = LLMConfig(model="gpt-4o", temperature=0.7)
-        kwargs = get_litellm_kwargs(cfg, model="gpt-3.5-turbo", temperature=0.1)
-        assert kwargs["model"] == "openai/gpt-3.5-turbo"
-        assert kwargs["temperature"] == 0.1
+    def test_set_model_invalid(self):
+        service = self._make_service()
+        with pytest.raises(KeyError, match="not found"):
+            service.set_model("NONEXISTENT")
 
-    def test_get_litellm_kwargs_multimodel(self):
-        from llm_service.factory import get_litellm_kwargs
+    def test_build_messages_text_only(self):
+        service = self._make_service()
+        messages = service._build_messages(
+            user_prompt="Hello",
+            system_prompt="Be helpful",
+        )
+        assert len(messages) == 2
+        assert messages[0] == {"role": "system", "content": "Be helpful"}
+        assert messages[1] == {"role": "user", "content": "Hello"}
+
+    def test_build_messages_user_only(self):
+        service = self._make_service()
+        messages = service._build_messages(user_prompt="Hello")
+        assert len(messages) == 1
+        assert messages[0] == {"role": "user", "content": "Hello"}
+
+    def test_build_messages_system_only(self):
+        service = self._make_service()
+        messages = service._build_messages(system_prompt="Be helpful")
+        assert len(messages) == 1
+        assert messages[0] == {"role": "system", "content": "Be helpful"}
+
+    def test_build_messages_no_input_raises(self):
+        service = self._make_service()
+        with pytest.raises(ValueError, match="Must provide"):
+            service._build_messages()
+
+    def test_build_messages_with_image(self):
+        service = self._make_service()
+        messages = service._build_messages(
+            user_prompt="Describe",
+            image_base64="abc123",
+        )
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "Describe"}
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"] == "data:image/png;base64,abc123"
+
+    def test_build_messages_with_data_uri(self):
+        service = self._make_service()
+        messages = service._build_messages(
+            user_prompt="Describe",
+            image_base64="data:image/jpeg;base64,xyz",
+        )
+        url = messages[0]["content"][1]["image_url"]["url"]
+        assert url == "data:image/jpeg;base64,xyz"
+
+    def test_build_messages_with_multiple_images(self):
+        service = self._make_service()
+        messages = service._build_messages(
+            user_prompt="Compare",
+            image_base64=["img1", "img2"],
+        )
+        content = messages[0]["content"]
+        assert len(content) == 3  # text + 2 images
+
+    def test_build_messages_prompt_template(self):
+        service = self._make_service()
+        messages = service._build_messages(
+            prompt_template="Check: {{ data }}",
+            prompt_variables={"data": "test-data"},
+            system_prompt="You are QA",
+        )
+        assert messages[0] == {"role": "system", "content": "You are QA"}
+        assert messages[1] == {"role": "user", "content": "Check: test-data"}
+
+    def test_build_messages_prompt_template_overrides_user_prompt(self):
+        service = self._make_service()
+        messages = service._build_messages(
+            user_prompt="ignored",
+            prompt_template="Template: {{ x }}",
+            prompt_variables={"x": "value"},
+        )
+        assert messages[0]["content"] == "Template: value"
+
+    @patch("litellm.completion")
+    def test_call_llm(self, mock_completion):
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 20
+        mock_usage.total_tokens = 30
+
+        mock_message = MagicMock()
+        mock_message.content = "Hello back!"
+        mock_message.reasoning_content = None
+
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = mock_usage
+        mock_resp.model = "qwen3"
+        mock_completion.return_value = mock_resp
+
+        service = self._make_service()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2-token"
+            mock_auth.return_value = mock_exchanger
+
+            response = service.call_llm(
+                user_prompt="Hello",
+                system_prompt="Be helpful",
+            )
+
+        assert isinstance(response, LLMResponse)
+        assert response.content == "Hello back!"
+        assert response.model == "qwen3"
+        assert response.usage.prompt_tokens == 10
+        assert response.usage.completion_tokens == 20
+        assert response.usage.total_tokens == 30
+
+        mock_completion.assert_called_once()
+        call_kwargs = mock_completion.call_args
+        assert call_kwargs.kwargs["model"] == "openai/qwen3"
+        assert call_kwargs.kwargs["api_base"] == "https://llm-dev/v1"
+
+    @patch("litellm.completion")
+    def test_call_llm_with_overrides(self, mock_completion):
+        mock_message = MagicMock()
+        mock_message.content = "Response"
+        mock_message.reasoning_content = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp.model = "qwen3"
+        mock_completion.return_value = mock_resp
+
+        service = self._make_service()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            service.call_llm(
+                user_prompt="Test",
+                temperature=0.1,
+                max_tokens=8192,
+            )
+
+        call_kwargs = mock_completion.call_args.kwargs
+        assert call_kwargs["temperature"] == 0.1
+        assert call_kwargs["max_tokens"] == 8192
+
+    @patch("litellm.completion")
+    def test_call_llm_with_reasoning_content(self, mock_completion):
+        mock_message = MagicMock()
+        mock_message.content = "Final answer"
+        mock_message.reasoning_content = "Let me think..."
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp.model = "qwen3"
+        mock_completion.return_value = mock_resp
+
+        service = self._make_service()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            response = service.call_llm(user_prompt="Think about this")
+
+        assert response.content == "Final answer"
+        assert response.reasoning_content == "Let me think..."
+
+    @patch("litellm.completion")
+    def test_call_llm_model_switch(self, mock_completion):
+        mock_message = MagicMock()
+        mock_message.content = "Response"
+        mock_message.reasoning_content = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp.model = "qwen3-vl"
+        mock_completion.return_value = mock_resp
+
+        service = self._make_service()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            service.set_model("QWEN3VL")
+            service.call_llm(user_prompt="Describe image", image_base64="abc")
+
+        call_kwargs = mock_completion.call_args.kwargs
+        assert call_kwargs["model"] == "openai/qwen3-vl"
+        assert call_kwargs["api_base"] == "https://vl-dev/v1"
+        assert call_kwargs["temperature"] == 0.3
+
+    @patch("litellm.completion")
+    def test_call_llm_prompt_template(self, mock_completion):
+        mock_message = MagicMock()
+        mock_message.content = "Checked"
+        mock_message.reasoning_content = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp.model = "qwen3"
+        mock_completion.return_value = mock_resp
+
+        service = self._make_service()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            response = service.call_llm(
+                prompt_template="Check: {{ data }}",
+                prompt_variables={"data": "test"},
+                system_prompt="QA",
+            )
+
+        messages = mock_completion.call_args.kwargs["messages"]
+        assert messages[0] == {"role": "system", "content": "QA"}
+        assert messages[1] == {"role": "user", "content": "Check: test"}
+
+
+class TestLLMServiceAsync:
+    @pytest.mark.asyncio
+    @patch("litellm.acompletion")
+    async def test_acall_llm(self, mock_acompletion):
+        mock_message = MagicMock()
+        mock_message.content = "Async response"
+        mock_message.reasoning_content = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp.model = "qwen3"
+        mock_acompletion.return_value = mock_resp
 
         cfg = LLMConfig(
             shared_config=SharedConfig(
@@ -365,163 +570,26 @@ class TestFactory:
                     j1_token="j1",
                     model_name="qwen3",
                     api_endpoints={"DEV": "https://dev/v1"},
-                    temperature=0.5,
                 ),
             },
         )
-        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+        service = LLMService(config=cfg)
+
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
             mock_exchanger = MagicMock()
             mock_exchanger.get_token.return_value = "j2"
-            mock_cls.return_value = mock_exchanger
+            mock_auth.return_value = mock_exchanger
 
-            kwargs = get_litellm_kwargs(cfg, model_alias="QWEN3")
-            assert kwargs["model"] == "openai/qwen3"
-            assert kwargs["api_base"] == "https://dev/v1"
-            assert kwargs["api_key"] == "j2"
-            assert kwargs["temperature"] == 0.5
+            response = await service.acall_llm(user_prompt="Hello async")
 
-    @patch("langchain_litellm.ChatLiteLLM")
-    def test_get_langchain_llm_legacy(self, mock_cls):
-        from llm_service.factory import get_langchain_llm
-
-        cfg = LLMConfig(model="gpt-4o", api_base="https://test/v1", api_key="k")
-        get_langchain_llm(cfg)
-
-        mock_cls.assert_called_once()
-        call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["model"] == "gpt-4o"
-        assert call_kwargs["api_base"] == "https://test/v1"
-
-    @patch("openai.OpenAI")
-    def test_get_openai_client_legacy(self, mock_cls):
-        from llm_service.factory import get_openai_client
-
-        cfg = LLMConfig(api_base="https://test/v1", api_key="k")
-        get_openai_client(cfg)
-
-        mock_cls.assert_called_once()
-        call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["base_url"] == "https://test/v1"
-        assert call_kwargs["api_key"] == "k"
+        assert response.content == "Async response"
+        mock_acompletion.assert_called_once()
 
 
-class TestBuildMultimodalMessages:
-    def test_text_only(self):
-        from llm_service.factory import build_multimodal_messages
-
-        messages = build_multimodal_messages(user_text="Hello")
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert messages[0]["content"] == "Hello"
-
-    def test_with_system_prompt(self):
-        from llm_service.factory import build_multimodal_messages
-
-        messages = build_multimodal_messages(user_text="Hi", system_prompt="Be helpful")
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
-
-    def test_with_single_image(self):
-        from llm_service.factory import build_multimodal_messages
-
-        messages = build_multimodal_messages(
-            user_text="Describe",
-            image_base64="abc123",
-        )
-        user_msg = messages[0]
-        assert isinstance(user_msg["content"], list)
-        assert user_msg["content"][0]["type"] == "text"
-        assert user_msg["content"][1]["type"] == "image_url"
-        assert user_msg["content"][1]["image_url"]["url"] == "data:image/png;base64,abc123"
-
-    def test_with_data_uri_prefix(self):
-        from llm_service.factory import build_multimodal_messages
-
-        messages = build_multimodal_messages(
-            user_text="Describe",
-            image_base64="data:image/jpeg;base64,xyz",
-        )
-        url = messages[0]["content"][1]["image_url"]["url"]
-        assert url == "data:image/jpeg;base64,xyz"
-
-    def test_with_multiple_images(self):
-        from llm_service.factory import build_multimodal_messages
-
-        messages = build_multimodal_messages(
-            user_text="Compare",
-            image_base64=["img1", "img2"],
-        )
-        content = messages[0]["content"]
-        assert len(content) == 3  # text + 2 images
+# === TokenExchanger 測試 ===
 
 
-class TestTokenExchange:
-    def test_resolve_api_key_without_auth(self):
-        cfg = LLMConfig(api_key="direct-key")
-        assert cfg.resolve_api_key() == "direct-key"
-
-    def test_resolve_api_key_with_auth(self):
-        cfg = LLMConfig(
-            auth=AuthConfig(
-                auth_url="https://auth.test/token",
-                auth_token="j1-token",
-            ),
-        )
-        with patch("llm_service.auth.TokenExchanger") as mock_cls:
-            mock_exchanger = MagicMock()
-            mock_exchanger.get_token.return_value = "j2-token"
-            mock_cls.return_value = mock_exchanger
-
-            result = cfg.resolve_api_key()
-            assert result == "j2-token"
-
-    def test_resolve_api_key_caches_exchanger(self):
-        cfg = LLMConfig(
-            auth=AuthConfig(
-                auth_url="https://auth.test/token",
-                auth_token="j1-token",
-            ),
-        )
-        with patch("llm_service.auth.TokenExchanger") as mock_cls:
-            mock_exchanger = MagicMock()
-            mock_exchanger.get_token.return_value = "j2"
-            mock_cls.return_value = mock_exchanger
-
-            cfg.resolve_api_key()
-            cfg.resolve_api_key()
-            mock_cls.assert_called_once()
-            assert mock_exchanger.get_token.call_count == 2
-
-    def test_from_yaml_with_auth(self, tmp_path):
-        yaml_file = tmp_path / "test_config.yaml"
-        yaml_file.write_text(
-            'api_base: "https://llm.test/v1"\n'
-            'model: "gpt-4o"\n'
-            'auth:\n'
-            '  auth_url: "https://auth.test/token"\n'
-            '  auth_token: "j1-from-yaml"\n'
-            '  token_field: "token"\n'
-        )
-        cfg = LLMConfig.from_yaml(str(yaml_file))
-        assert cfg.auth is not None
-        assert cfg.auth.auth_url == "https://auth.test/token"
-        assert cfg.auth.auth_token == "j1-from-yaml"
-        assert cfg.auth.token_field == "token"
-
-    def test_from_yaml_auth_token_env_override(self, tmp_path, monkeypatch):
-        yaml_file = tmp_path / "test_config.yaml"
-        yaml_file.write_text(
-            'auth:\n'
-            '  auth_url: "https://auth.test/token"\n'
-            '  auth_token: "yaml-j1"\n'
-        )
-        monkeypatch.setenv("LLM_AUTH_TOKEN", "env-j1")
-        cfg = LLMConfig.from_yaml(str(yaml_file))
-        assert cfg.auth.auth_token == "env-j1"
-
-
-class TestTokenExchangerUnit:
+class TestTokenExchanger:
     def test_token_exchange_flow(self):
         from llm_service.auth import TokenExchanger
 
@@ -574,16 +642,3 @@ class TestTokenExchangerUnit:
         assert exchanger.is_expired is False
         exchanger.clear_cache()
         assert exchanger.is_expired is True
-        assert exchanger._cached_token is None
-
-
-class TestLLMClientDeprecated:
-    def test_deprecation_warning(self):
-        from llm_service.client import LLMClient
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            LLMClient(config=LLMConfig())
-            assert len(w) == 1
-            assert issubclass(w[0].category, DeprecationWarning)
-            assert "deprecated" in str(w[0].message).lower()

@@ -25,3 +25,4 @@ class LLMResponse:
     model: str = ""
     usage: TokenUsage = field(default_factory=TokenUsage)
     latency_ms: float = 0.0
+    reasoning_content: str | None = None

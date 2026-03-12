@@ -5,6 +5,9 @@
 #   shared_config  — 全域共用設定（J1→J2 auth URL 分四個 zone）
 #   model_configs  — 各模型獨立設定（token、endpoint、超參數）
 
+# 預設模型別名（對應 model_configs 中的 key），LLMService 初始化時自動使用
+default_model: "QWEN3"
+
 # === 共用設定 ===
 shared_config:
   # 預設使用的環境 zone（DEV / TEST / STG / PROD），可用 LLM_ZONE 環境變數覆寫
