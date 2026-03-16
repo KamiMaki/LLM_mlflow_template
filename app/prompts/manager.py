@@ -39,12 +39,6 @@ class PromptManager:
     ) -> str | None:
         """註冊或更新 prompt 到 MLflow Prompt Registry。
 
-        Args:
-            name: Prompt 名稱。
-            template: 模板字串（使用 {{ variable }} 語法）。
-            commit_message: 版本紀錄訊息。
-            model_config: 綁定的模型設定（model, temperature 等）。
-
         Returns:
             版本號字串，MLflow 不可用時回傳 None。
         """
@@ -56,25 +50,21 @@ class PromptManager:
         try:
             import mlflow
 
+            # 檢查是否已存在且未變更
             try:
                 existing = mlflow.genai.load_prompt(f"prompts:/{name}")
                 if existing.template == template:
                     logger.debug(f"Prompt '{name}' unchanged, skipping update")
                     return str(getattr(existing, "version", "latest"))
-
-                kwargs = {"name": name, "template": template, "commit_message": commit_message}
-                if model_config:
-                    kwargs["model_config"] = model_config
-                prompt = mlflow.genai.register_prompt(**kwargs)
-                logger.info(f"Updated prompt '{name}' to version {prompt.version}")
-                return str(prompt.version)
             except Exception:
-                kwargs = {"name": name, "template": template, "commit_message": commit_message}
-                if model_config:
-                    kwargs["model_config"] = model_config
-                prompt = mlflow.genai.register_prompt(**kwargs)
-                logger.info(f"Registered new prompt '{name}' version {prompt.version}")
-                return str(prompt.version)
+                pass  # 不存在，繼續註冊
+
+            kwargs: dict[str, Any] = {"name": name, "template": template, "commit_message": commit_message}
+            if model_config:
+                kwargs["model_config"] = model_config
+            prompt = mlflow.genai.register_prompt(**kwargs)
+            logger.info(f"Registered prompt '{name}' version {prompt.version}")
+            return str(prompt.version)
 
         except Exception as e:
             logger.error(f"Failed to register prompt '{name}': {e}")
