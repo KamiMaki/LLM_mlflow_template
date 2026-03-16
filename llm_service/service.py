@@ -33,7 +33,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+import logging
+
 import litellm
+
+# 抑制 LiteLLM 冗長的 console 輸出（Provider List、model cost map 等）
+litellm.suppress_debug_info = True
+litellm.set_verbose = False
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
+logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from .config import LLMConfig, ResolvedModelConfig
 from .models import LLMResponse, TokenUsage
