@@ -110,8 +110,17 @@ def init_mlflow(cfg=None) -> None:
             _loguru_logger.info(f"MLflow active model: {model_name}")
 
         try:
-            mlflow.litellm.autolog()
-            _loguru_logger.info("MLflow LiteLLM autolog enabled")
+            # log_traces=False: 由 LLMService 手動建立 sanitized trace span，
+            # 避免 autolog 記錄 extra_headers 中的敏感 token。
+            mlflow.litellm.autolog(log_traces=False)
+            _loguru_logger.info("MLflow LiteLLM autolog enabled (traces handled by LLMService)")
+        except TypeError:
+            # 舊版 MLflow 不支援 log_traces 參數
+            try:
+                mlflow.litellm.autolog()
+                _loguru_logger.info("MLflow LiteLLM autolog enabled")
+            except Exception:
+                _loguru_logger.debug("LiteLLM autolog not available")
         except Exception:
             _loguru_logger.debug("LiteLLM autolog not available")
 

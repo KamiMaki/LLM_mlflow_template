@@ -1,8 +1,8 @@
-"""llm_service 單元測試 — LLMService + Config。"""
+"""llm_service 單元測試 — LLMService + Config + Trace + Retry + AI Service。"""
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -10,10 +10,103 @@ from llm_service.config import (
     LLMConfig,
     ModelConfig,
     ResolvedModelConfig,
+    RetryConfig,
+    ServiceConfig,
     SharedConfig,
 )
-from llm_service.models import LLMResponse, TokenUsage
+from llm_service.models import AIServiceResponse, LLMResponse, TokenUsage
 from llm_service.service import LLMService
+from llm_service.trace import (
+    is_sensitive_key,
+    sanitize_completion_kwargs,
+    sanitize_dict,
+)
+
+
+# === Trace / Sanitizer 測試 ===
+
+
+class TestSanitizer:
+    def test_is_sensitive_key_token(self):
+        assert is_sensitive_key("Authorization") is True
+        assert is_sensitive_key("x-auth-token") is True
+        assert is_sensitive_key("api_key") is True
+        assert is_sensitive_key("Bearer") is True
+        assert is_sensitive_key("password") is True
+        assert is_sensitive_key("secret_key") is True
+        assert is_sensitive_key("credential") is True
+
+    def test_is_sensitive_key_safe(self):
+        assert is_sensitive_key("Content-Type") is False
+        assert is_sensitive_key("X-Team-Id") is False
+        assert is_sensitive_key("model") is False
+
+    def test_sanitize_dict_masks_sensitive(self):
+        data = {
+            "Authorization": "Bearer sk-1234567890abcdef",
+            "X-Team-Id": "team-123",
+            "api_key": "long-secret-key-value",
+        }
+        result = sanitize_dict(data)
+        assert "***REDACTED***" in result["Authorization"]
+        assert result["Authorization"].startswith("Bear")
+        assert result["X-Team-Id"] == "team-123"
+        assert "***REDACTED***" in result["api_key"]
+
+    def test_sanitize_dict_short_value(self):
+        result = sanitize_dict({"token": "short"})
+        assert result["token"] == "***REDACTED***"
+
+    def test_sanitize_dict_nested(self):
+        data = {"headers": {"Authorization": "Bearer long-token-value-here"}}
+        result = sanitize_dict(data)
+        assert "***REDACTED***" in result["headers"]["Authorization"]
+
+    def test_sanitize_dict_list(self):
+        data = [{"token": "secret-long-value-123"}]
+        result = sanitize_dict(data)
+        assert "***REDACTED***" in result[0]["token"]
+
+    def test_sanitize_dict_non_dict(self):
+        assert sanitize_dict("plain string") == "plain string"
+        assert sanitize_dict(42) == 42
+
+    def test_sanitize_completion_kwargs(self):
+        kwargs = {
+            "model": "openai/qwen3",
+            "api_key": "j2-long-token-value-here",
+            "api_base": "https://llm-dev/v1",
+            "extra_headers": {
+                "Authorization": "Bearer some-long-token",
+                "X-Team-Id": "team-abc",
+            },
+            "messages": [{"role": "user", "content": "Hello"}],
+            "temperature": 0.7,
+        }
+        result = sanitize_completion_kwargs(kwargs)
+        assert result["model"] == "openai/qwen3"
+        assert "***REDACTED***" in result["api_key"]
+        assert "***REDACTED***" in result["extra_headers"]["Authorization"]
+        assert result["extra_headers"]["X-Team-Id"] == "team-abc"
+        assert result["messages"] == [{"role": "user", "content": "Hello"}]
+        assert result["temperature"] == 0.7
+
+
+# === RetryConfig 測試 ===
+
+
+class TestRetryConfig:
+    def test_defaults(self):
+        rc = RetryConfig()
+        assert rc.max_attempts == 1
+        assert rc.wait_multiplier == 1.0
+        assert rc.wait_min == 2.0
+        assert rc.wait_max == 10.0
+
+    def test_custom_values(self):
+        rc = RetryConfig(max_attempts=3, wait_multiplier=2.0, wait_min=1.0, wait_max=30.0)
+        assert rc.max_attempts == 3
+        assert rc.wait_multiplier == 2.0
 
 
 # === Config 測試 ===
@@ -44,6 +137,28 @@ class TestSharedConfig:
         sc = SharedConfig(auth_urls={"DEV": "https://auth/token"})
         with pytest.raises(ValueError, match="No auth_url configured"):
             sc.get_auth_url("PROD")
+
+    def test_j1_token_path_default(self):
+        sc = SharedConfig(auth_urls={"DEV": "https://auth/token"})
+        assert sc.j1_token_path == ""
+
+    def test_j1_token_path_custom(self):
+        sc = SharedConfig(
+            auth_urls={"DEV": "https://auth/token"},
+            j1_token_path="/var/run/secrets/j1-token",
+        )
+        assert sc.j1_token_path == "/var/run/secrets/j1-token"
+
+    def test_retry_default(self):
+        sc = SharedConfig(auth_urls={"DEV": "https://auth/token"})
+        assert sc.retry.max_attempts == 1
+
+    def test_retry_custom(self):
+        sc = SharedConfig(
+            auth_urls={"DEV": "https://auth/token"},
+            retry=RetryConfig(max_attempts=3),
+        )
+        assert sc.retry.max_attempts == 3
 
 
 class TestModelConfig:
@@ -82,6 +197,39 @@ class TestModelConfig:
         params = mc.get_hyperparams()
         assert "top_p" not in params
         assert "stop" not in params
+
+
+# === ServiceConfig 測試 ===
+
+
+class TestServiceConfig:
+    def test_basic_service_config(self):
+        sc = ServiceConfig(
+            j1_token="svc-token",
+            api_endpoints={"DEV": "https://svc-dev/v1"},
+            timeout=60,
+        )
+        assert sc.j1_token == "svc-token"
+        assert sc.timeout == 60
+
+    def test_get_api_endpoint(self):
+        sc = ServiceConfig(
+            api_endpoints={"DEV": "https://dev/v1", "PROD": "https://prod/v1"},
+        )
+        assert sc.get_api_endpoint("DEV") == "https://dev/v1"
+
+    def test_get_api_endpoint_missing_zone(self):
+        sc = ServiceConfig(api_endpoints={"DEV": "https://dev/v1"})
+        with pytest.raises(ValueError, match="No api_endpoint configured"):
+            sc.get_api_endpoint("PROD")
+
+    def test_default_timeout(self):
+        sc = ServiceConfig(api_endpoints={"DEV": "https://dev/v1"})
+        assert sc.timeout == 30
+
+    def test_extra_headers_coerce_none(self):
+        sc = ServiceConfig(api_endpoints={"DEV": "https://dev/v1"}, extra_headers=None)
+        assert sc.extra_headers == {}
 
 
 class TestLLMConfig:
@@ -167,6 +315,80 @@ class TestLLMConfig:
         with pytest.raises(ValueError, match="No J1 token"):
             cfg.resolve("QWEN3")
 
+    def test_resolve_j1_from_file(self, tmp_path):
+        token_file = tmp_path / "j1-token"
+        token_file.write_text("file-j1-token")
+
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                auth_urls={"DEV": "https://auth/token"},
+                j1_token_path=str(token_file),
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://dev/v1"},
+                ),
+            },
+        )
+        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2-from-file"
+            mock_cls.return_value = mock_exchanger
+
+            resolved = cfg.resolve("QWEN3")
+            assert resolved.api_key == "j2-from-file"
+            # 驗證 TokenExchanger 收到 file-j1-token
+            mock_cls.assert_called_once()
+            call_kwargs = mock_cls.call_args
+            assert call_kwargs.kwargs.get("auth_token") or call_kwargs.args[1] == "file-j1-token"
+
+    def test_resolve_j1_env_overrides_file(self, tmp_path, monkeypatch):
+        token_file = tmp_path / "j1-token"
+        token_file.write_text("file-j1-token")
+        monkeypatch.setenv("LLM_AUTH_TOKEN_QWEN3", "env-j1-token")
+
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                auth_urls={"DEV": "https://auth/token"},
+                j1_token_path=str(token_file),
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="config-j1",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://dev/v1"},
+                ),
+            },
+        )
+        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_cls.return_value = mock_exchanger
+
+            cfg.resolve("QWEN3")
+            # env var 優先於 config 和 file
+            call_kwargs = mock_cls.call_args
+            assert call_kwargs.kwargs.get("auth_token") == "env-j1-token"
+
+    def test_read_j1_from_file_not_found(self):
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                auth_urls={"DEV": "https://auth/token"},
+                j1_token_path="/nonexistent/path/j1-token",
+            ),
+            model_configs={},
+        )
+        assert cfg._read_j1_from_file() == ""
+
+    def test_read_j1_from_file_empty_path(self):
+        cfg = LLMConfig(
+            shared_config=SharedConfig(auth_urls={"DEV": "https://auth/token"}),
+            model_configs={},
+        )
+        assert cfg._read_j1_from_file() == ""
+
     def test_validation_requires_auth_urls(self):
         with pytest.raises(ValueError, match="auth_urls is required"):
             LLMConfig(
@@ -176,6 +398,15 @@ class TestLLMConfig:
                         model_name="qwen3",
                         api_endpoints={"DEV": "https://dev/v1"},
                     ),
+                },
+            )
+
+    def test_validation_requires_auth_urls_for_services(self):
+        with pytest.raises(ValueError, match="auth_urls is required"):
+            LLMConfig(
+                shared_config=SharedConfig(auth_urls={}),
+                service_configs={
+                    "SVC": ServiceConfig(api_endpoints={"DEV": "https://dev/v1"}),
                 },
             )
 
@@ -193,6 +424,43 @@ class TestLLMConfig:
                     ),
                 },
             )
+
+    def test_get_service_config(self):
+        cfg = LLMConfig(
+            shared_config=SharedConfig(auth_urls={"DEV": "https://auth/token"}),
+            service_configs={
+                "IMG": ServiceConfig(api_endpoints={"DEV": "https://img/v1"}),
+            },
+        )
+        sc = cfg.get_service_config("IMG")
+        assert sc.get_api_endpoint("DEV") == "https://img/v1"
+
+    def test_get_service_config_not_found(self):
+        cfg = LLMConfig(
+            shared_config=SharedConfig(auth_urls={"DEV": "https://auth/token"}),
+            service_configs={},
+        )
+        with pytest.raises(KeyError, match="not found"):
+            cfg.get_service_config("NONEXISTENT")
+
+    def test_resolve_service(self):
+        cfg = LLMConfig(
+            shared_config=SharedConfig(auth_urls={"DEV": "https://auth/token"}),
+            service_configs={
+                "IMG": ServiceConfig(
+                    j1_token="svc-j1",
+                    api_endpoints={"DEV": "https://img-dev/v1"},
+                ),
+            },
+        )
+        with patch("llm_service.auth.TokenExchanger") as mock_cls:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "svc-j2"
+            mock_cls.return_value = mock_exchanger
+
+            endpoint, j2, headers = cfg.resolve_service("IMG")
+            assert endpoint == "https://img-dev/v1"
+            assert j2 == "svc-j2"
 
     def test_clear_token_cache(self):
         cfg = self._make_config()
@@ -213,6 +481,9 @@ class TestLLMConfig:
             '  default_zone: "DEV"\n'
             '  auth_urls:\n'
             '    DEV: "https://auth-dev/token"\n'
+            '  retry:\n'
+            '    max_attempts: 3\n'
+            '    wait_min: 1.0\n'
             'model_configs:\n'
             '  QWEN3:\n'
             '    j1_token: "yaml-j1"\n'
@@ -225,6 +496,8 @@ class TestLLMConfig:
         assert cfg.default_model == "QWEN3"
         assert "QWEN3" in cfg.model_configs
         assert cfg.model_configs["QWEN3"].temperature == 0.5
+        assert cfg.shared_config.retry.max_attempts == 3
+        assert cfg.shared_config.retry.wait_min == 1.0
 
     def test_from_yaml_zone_env_override(self, tmp_path, monkeypatch):
         yaml_file = tmp_path / "llm_config.yaml"
@@ -262,6 +535,22 @@ class TestLLMConfig:
         cfg = LLMConfig.from_yaml(str(yaml_file))
         assert cfg.model_configs["QWEN3"].j1_token == "env-j1"
 
+    def test_from_yaml_service_token_env_override(self, tmp_path, monkeypatch):
+        yaml_file = tmp_path / "llm_config.yaml"
+        yaml_file.write_text(
+            'shared_config:\n'
+            '  auth_urls:\n'
+            '    DEV: "https://auth/token"\n'
+            'service_configs:\n'
+            '  IMG:\n'
+            '    j1_token: "yaml-svc-j1"\n'
+            '    api_endpoints:\n'
+            '      DEV: "https://img/v1"\n'
+        )
+        monkeypatch.setenv("LLM_AUTH_TOKEN_IMG", "env-svc-j1")
+        cfg = LLMConfig.from_yaml(str(yaml_file))
+        assert cfg.service_configs["IMG"].j1_token == "env-svc-j1"
+
     def test_from_yaml_missing_file(self):
         cfg = LLMConfig.from_yaml("nonexistent.yaml")
         assert cfg.model_configs == {}
@@ -271,13 +560,14 @@ class TestLLMConfig:
 
 
 class TestLLMService:
-    def _make_service(self, default_model="", **model_overrides):
+    def _make_service(self, default_model="", retry_attempts=1, **model_overrides):
         """建立帶 mock config 的 LLMService。"""
         cfg = LLMConfig(
             default_model=default_model,
             shared_config=SharedConfig(
                 default_zone="DEV",
                 auth_urls={"DEV": "https://auth/token"},
+                retry=RetryConfig(max_attempts=retry_attempts),
             ),
             model_configs={
                 "QWEN3": ModelConfig(
@@ -296,6 +586,18 @@ class TestLLMService:
             },
         )
         return LLMService(config=cfg)
+
+    def _mock_completion_response(self, content="Hello back!", reasoning=None):
+        mock_message = MagicMock()
+        mock_message.content = content
+        mock_message.reasoning_content = reasoning
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        mock_resp.model = "qwen3"
+        return mock_resp
 
     def test_init_default_model(self):
         service = self._make_service()
@@ -395,23 +697,7 @@ class TestLLMService:
 
     @patch("litellm.completion")
     def test_call_llm(self, mock_completion):
-        mock_usage = MagicMock()
-        mock_usage.prompt_tokens = 10
-        mock_usage.completion_tokens = 20
-        mock_usage.total_tokens = 30
-
-        mock_message = MagicMock()
-        mock_message.content = "Hello back!"
-        mock_message.reasoning_content = None
-
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
-
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_resp.usage = mock_usage
-        mock_resp.model = "qwen3"
-        mock_completion.return_value = mock_resp
+        mock_completion.return_value = self._mock_completion_response()
 
         service = self._make_service()
         with patch("llm_service.auth.TokenExchanger") as mock_auth:
@@ -438,16 +724,7 @@ class TestLLMService:
 
     @patch("litellm.completion")
     def test_call_llm_with_overrides(self, mock_completion):
-        mock_message = MagicMock()
-        mock_message.content = "Response"
-        mock_message.reasoning_content = None
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
-        mock_resp.model = "qwen3"
-        mock_completion.return_value = mock_resp
+        mock_completion.return_value = self._mock_completion_response("Response")
 
         service = self._make_service()
         with patch("llm_service.auth.TokenExchanger") as mock_auth:
@@ -467,16 +744,9 @@ class TestLLMService:
 
     @patch("litellm.completion")
     def test_call_llm_with_reasoning_content(self, mock_completion):
-        mock_message = MagicMock()
-        mock_message.content = "Final answer"
-        mock_message.reasoning_content = "Let me think..."
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
-        mock_resp.model = "qwen3"
-        mock_completion.return_value = mock_resp
+        mock_completion.return_value = self._mock_completion_response(
+            "Final answer", reasoning="Let me think..."
+        )
 
         service = self._make_service()
         with patch("llm_service.auth.TokenExchanger") as mock_auth:
@@ -491,14 +761,7 @@ class TestLLMService:
 
     @patch("litellm.completion")
     def test_call_llm_model_switch(self, mock_completion):
-        mock_message = MagicMock()
-        mock_message.content = "Response"
-        mock_message.reasoning_content = None
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp = self._mock_completion_response("Response")
         mock_resp.model = "qwen3-vl"
         mock_completion.return_value = mock_resp
 
@@ -518,16 +781,7 @@ class TestLLMService:
 
     @patch("litellm.completion")
     def test_call_llm_prompt_template(self, mock_completion):
-        mock_message = MagicMock()
-        mock_message.content = "Checked"
-        mock_message.reasoning_content = None
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
-        mock_resp.model = "qwen3"
-        mock_completion.return_value = mock_resp
+        mock_completion.return_value = self._mock_completion_response("Checked")
 
         service = self._make_service()
         with patch("llm_service.auth.TokenExchanger") as mock_auth:
@@ -535,7 +789,7 @@ class TestLLMService:
             mock_exchanger.get_token.return_value = "j2"
             mock_auth.return_value = mock_exchanger
 
-            response = service.call_llm(
+            service.call_llm(
                 prompt_template="Check: {{ data }}",
                 prompt_variables={"data": "test"},
                 system_prompt="QA",
@@ -544,6 +798,121 @@ class TestLLMService:
         messages = mock_completion.call_args.kwargs["messages"]
         assert messages[0] == {"role": "system", "content": "QA"}
         assert messages[1] == {"role": "user", "content": "Check: test"}
+
+
+# === Retry 測試 ===
+
+
+class TestRetry:
+    @patch("litellm.completion")
+    def test_retry_on_failure(self, mock_completion):
+        """測試 retry 機制：前兩次失敗，第三次成功。"""
+        mock_message = MagicMock()
+        mock_message.content = "Success"
+        mock_message.reasoning_content = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
+        mock_resp.model = "qwen3"
+
+        mock_completion.side_effect = [
+            ConnectionError("Network error"),
+            ConnectionError("Network error again"),
+            mock_resp,
+        ]
+
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                default_zone="DEV",
+                auth_urls={"DEV": "https://auth/token"},
+                retry=RetryConfig(max_attempts=3, wait_min=0.01, wait_max=0.02),
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="j1",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://dev/v1"},
+                ),
+            },
+        )
+        service = LLMService(config=cfg)
+
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            response = service.call_llm(user_prompt="Test retry")
+
+        assert response.content == "Success"
+        assert mock_completion.call_count == 3
+
+    @patch("litellm.completion")
+    def test_no_retry_when_disabled(self, mock_completion):
+        """max_attempts=1 時不重試。"""
+        mock_completion.side_effect = ConnectionError("fail")
+
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                default_zone="DEV",
+                auth_urls={"DEV": "https://auth/token"},
+                retry=RetryConfig(max_attempts=1),
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="j1",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://dev/v1"},
+                ),
+            },
+        )
+        service = LLMService(config=cfg)
+
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            with pytest.raises(ConnectionError):
+                service.call_llm(user_prompt="Test no retry")
+
+        assert mock_completion.call_count == 1
+
+    @patch("litellm.completion")
+    def test_retry_exhausted(self, mock_completion):
+        """所有 retry 用完仍失敗時 raise。"""
+        mock_completion.side_effect = ConnectionError("persistent failure")
+
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                default_zone="DEV",
+                auth_urls={"DEV": "https://auth/token"},
+                retry=RetryConfig(max_attempts=2, wait_min=0.01, wait_max=0.02),
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="j1",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://dev/v1"},
+                ),
+            },
+        )
+        service = LLMService(config=cfg)
+
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "j2"
+            mock_auth.return_value = mock_exchanger
+
+            with pytest.raises(ConnectionError, match="persistent failure"):
+                service.call_llm(user_prompt="Test retry exhausted")
+
+        assert mock_completion.call_count == 2
+
+
+# === Async 測試 ===
 
 
 class TestLLMServiceAsync:
@@ -584,6 +953,92 @@ class TestLLMServiceAsync:
 
         assert response.content == "Async response"
         mock_acompletion.assert_called_once()
+
+
+# === call_service 測試 ===
+
+
+class TestCallService:
+    def _make_service_with_svc(self):
+        cfg = LLMConfig(
+            shared_config=SharedConfig(
+                default_zone="DEV",
+                auth_urls={"DEV": "https://auth/token"},
+            ),
+            model_configs={
+                "QWEN3": ModelConfig(
+                    j1_token="j1",
+                    model_name="qwen3",
+                    api_endpoints={"DEV": "https://dev/v1"},
+                ),
+            },
+            service_configs={
+                "IMG": ServiceConfig(
+                    j1_token="svc-j1",
+                    api_endpoints={"DEV": "https://img-dev/v1/extract"},
+                    timeout=60,
+                ),
+            },
+        )
+        return LLMService(config=cfg)
+
+    @patch("httpx.Client")
+    def test_call_service_basic(self, mock_client_cls):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"result": "extracted", "confidence": 0.95}
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        service = self._make_service_with_svc()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "svc-j2"
+            mock_auth.return_value = mock_exchanger
+
+            result = service.call_service("IMG", payload={"image": "base64data"})
+
+        assert isinstance(result, AIServiceResponse)
+        assert result.status_code == 200
+        assert result.data["result"] == "extracted"
+        assert result.raw_response["confidence"] == 0.95
+
+    @patch("httpx.Client")
+    def test_call_service_with_parser(self, mock_client_cls):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"data": {"text": "parsed content"}}
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        service = self._make_service_with_svc()
+        with patch("llm_service.auth.TokenExchanger") as mock_auth:
+            mock_exchanger = MagicMock()
+            mock_exchanger.get_token.return_value = "svc-j2"
+            mock_auth.return_value = mock_exchanger
+
+            result = service.call_service(
+                "IMG",
+                payload={"image": "base64data"},
+                response_parser=lambda r: r["data"]["text"],
+            )
+
+        assert result.data == "parsed content"
+
+    def test_call_service_not_found(self):
+        service = self._make_service_with_svc()
+        with pytest.raises(KeyError, match="not found"):
+            service.call_service("NONEXISTENT")
 
 
 # === TokenExchanger 測試 ===
@@ -642,3 +1097,30 @@ class TestTokenExchanger:
         assert exchanger.is_expired is False
         exchanger.clear_cache()
         assert exchanger.is_expired is True
+
+
+# === AIServiceResponse 測試 ===
+
+
+class TestAIServiceResponse:
+    def test_default_values(self):
+        resp = AIServiceResponse()
+        assert resp.data is None
+        assert resp.status_code == 200
+        assert resp.latency_ms == 0.0
+        assert resp.raw_response == {}
+
+    def test_custom_values(self):
+        resp = AIServiceResponse(
+            data={"text": "hello"},
+            status_code=201,
+            latency_ms=150.5,
+            raw_response={"text": "hello", "meta": {}},
+        )
+        assert resp.data["text"] == "hello"
+        assert resp.status_code == 201
+
+    def test_frozen(self):
+        resp = AIServiceResponse(data="test")
+        with pytest.raises(AttributeError):
+            resp.data = "modified"  # type: ignore[misc]

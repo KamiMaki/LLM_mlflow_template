@@ -16,9 +16,19 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 VALID_ZONES = {"DEV", "TEST", "STG", "PROD"}
+
+
+class RetryConfig(BaseModel):
+    """Retry 設定 — 搭配 tenacity 使用。"""
+
+    max_attempts: int = Field(default=1, description="最大重試次數（1 = 不重試）")
+    wait_multiplier: float = Field(default=1.0, description="指數退避乘數")
+    wait_min: float = Field(default=2.0, description="最小等待秒數")
+    wait_max: float = Field(default=10.0, description="最大等待秒數")
 
 
 class SharedConfig(BaseModel):
@@ -36,6 +46,12 @@ class SharedConfig(BaseModel):
     buffer_seconds: int = Field(default=60)
     extra_body: dict[str, Any] = Field(default_factory=dict)
     extra_headers: dict[str, str] = Field(default_factory=dict)
+
+    j1_token_path: str = Field(
+        default="",
+        description="J1 token 檔案路徑（非 DEV 環境從 pod 讀取）",
+    )
+    retry: RetryConfig = Field(default_factory=RetryConfig)
 
     @field_validator("default_zone", mode="before")
     @classmethod
@@ -121,6 +137,33 @@ class ModelConfig(BaseModel):
         return params
 
 
+class ServiceConfig(BaseModel):
+    """自訂 AI 服務設定（非 LLM），如圖片辨識、文件擷取等。"""
+
+    j1_token: str = Field(default="", description="J1 token，建議用環境變數傳入")
+    api_endpoints: dict[str, str] = Field(
+        default_factory=dict,
+        description="各 zone 的 API endpoint",
+    )
+    timeout: int = Field(default=30, description="HTTP 請求超時秒數")
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("extra_headers", mode="before")
+    @classmethod
+    def _coerce_extra_headers(cls, v):
+        return v or {}
+
+    def get_api_endpoint(self, zone: str) -> str:
+        """取得指定 zone 的 API endpoint。"""
+        z = zone.upper()
+        if z not in self.api_endpoints:
+            raise ValueError(
+                f"No api_endpoint configured for zone '{z}'. "
+                f"Available zones: {list(self.api_endpoints.keys())}"
+            )
+        return self.api_endpoints[z]
+
+
 class ResolvedModelConfig(BaseModel):
     """已解析的模型設定 — 可直接用於 litellm.completion()。"""
 
@@ -141,6 +184,7 @@ class LLMConfig(BaseModel):
     default_model: str = Field(default="", description="預設使用的模型別名")
     shared_config: SharedConfig = Field(default_factory=SharedConfig)
     model_configs: dict[str, ModelConfig] = Field(default_factory=dict)
+    service_configs: dict[str, ServiceConfig] = Field(default_factory=dict)
 
     _exchangers: dict[str, Any] = {}
 
@@ -149,12 +193,13 @@ class LLMConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_config(self):
         """驗證設定。"""
-        if self.model_configs:
+        if self.model_configs or self.service_configs:
             if not self.shared_config.auth_urls:
                 raise ValueError(
-                    "shared_config.auth_urls is required when using model_configs. "
+                    "shared_config.auth_urls is required when using model_configs or service_configs. "
                     "At least one zone auth URL must be configured."
                 )
+        if self.model_configs:
             default_zone = self.shared_config.default_zone
             for name, mcfg in self.model_configs.items():
                 if default_zone not in mcfg.api_endpoints:
@@ -182,6 +227,41 @@ class LLMConfig(BaseModel):
             )
         return self.model_configs[model_alias]
 
+    def get_service_config(self, service_name: str) -> ServiceConfig:
+        """取得指定 AI 服務的原始設定。"""
+        if service_name not in self.service_configs:
+            raise KeyError(
+                f"Service '{service_name}' not found. "
+                f"Available services: {list(self.service_configs.keys())}"
+            )
+        return self.service_configs[service_name]
+
+    def _read_j1_from_file(self) -> str:
+        """從檔案路徑讀取 J1 token（非 DEV 環境使用 pod 掛載路徑）。"""
+        path = self.shared_config.j1_token_path
+        if not path:
+            return ""
+        try:
+            token = Path(path).read_text(encoding="utf-8").strip()
+            if token:
+                logger.debug(f"J1 token read from file: {path}")
+            return token
+        except (OSError, FileNotFoundError):
+            logger.debug(f"J1 token file not found or unreadable: {path}")
+            return ""
+
+    def _resolve_j1_token(self, alias: str, token_from_config: str) -> str:
+        """從多個來源解析 J1 token。
+
+        優先順序：env var > config value > file path。
+        """
+        return (
+            os.getenv(f"LLM_AUTH_TOKEN_{alias}")
+            or os.getenv("LLM_AUTH_TOKEN")
+            or token_from_config
+            or self._read_j1_from_file()
+        )
+
     def resolve(self, model_alias: str, zone: str | None = None) -> ResolvedModelConfig:
         """解析指定模型 + zone 的完整設定，自動執行 J1→J2 token exchange。"""
         z = (zone or os.getenv("LLM_ZONE") or self.shared_config.default_zone).upper()
@@ -190,16 +270,13 @@ class LLMConfig(BaseModel):
         api_base = mcfg.get_api_endpoint(z)
         auth_url = self.shared_config.get_auth_url(z)
 
-        j1_token = (
-            os.getenv(f"LLM_AUTH_TOKEN_{model_alias}")
-            or os.getenv("LLM_AUTH_TOKEN")
-            or mcfg.j1_token
-        )
+        j1_token = self._resolve_j1_token(model_alias, mcfg.j1_token)
         if not j1_token:
             raise ValueError(
                 f"No J1 token for model '{model_alias}'. "
                 f"Set LLM_AUTH_TOKEN_{model_alias} or LLM_AUTH_TOKEN env var, "
-                f"or configure j1_token in llm_config.yaml."
+                f"configure j1_token in llm_config.yaml, "
+                f"or set shared_config.j1_token_path for file-based token."
             )
 
         api_key = self._exchange_token(model_alias, auth_url, j1_token)
@@ -232,6 +309,31 @@ class LLMConfig(BaseModel):
             )
 
         return self._exchangers[cache_key].get_token()
+
+    def resolve_service(
+        self, service_name: str, zone: str | None = None
+    ) -> tuple[str, str, dict[str, str]]:
+        """解析 AI 服務的 endpoint、J2 token、headers。
+
+        Returns:
+            (endpoint, j2_token, merged_headers)
+        """
+        z = (zone or os.getenv("LLM_ZONE") or self.shared_config.default_zone).upper()
+        scfg = self.get_service_config(service_name)
+        endpoint = scfg.get_api_endpoint(z)
+        auth_url = self.shared_config.get_auth_url(z)
+
+        j1_token = self._resolve_j1_token(service_name, scfg.j1_token)
+        if not j1_token:
+            raise ValueError(
+                f"No J1 token for service '{service_name}'. "
+                f"Set LLM_AUTH_TOKEN_{service_name} or LLM_AUTH_TOKEN env var, "
+                f"or configure j1_token in service_configs."
+            )
+
+        j2_token = self._exchange_token(f"svc_{service_name}", auth_url, j1_token)
+        merged_headers = {**self.shared_config.extra_headers, **scfg.extra_headers}
+        return endpoint, j2_token, merged_headers
 
     def clear_token_cache(self, model_alias: str | None = None) -> None:
         """清除 token exchange 快取。"""
@@ -269,5 +371,11 @@ class LLMConfig(BaseModel):
                 token_env = os.getenv(f"LLM_AUTH_TOKEN_{model_alias}")
                 if token_env:
                     data["model_configs"][model_alias]["j1_token"] = token_env
+
+        if "service_configs" in data:
+            for svc_name in data["service_configs"]:
+                token_env = os.getenv(f"LLM_AUTH_TOKEN_{svc_name}")
+                if token_env:
+                    data["service_configs"][svc_name]["j1_token"] = token_env
 
         return cls(**data)
